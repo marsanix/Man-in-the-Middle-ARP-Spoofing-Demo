@@ -1,7 +1,7 @@
 {
   "name": "secure-backend",
   "version": "1.0.0",
-  "description": "Hardened Express backend with HTTPS/TLS for secure MITM-resistant demo",
+  "description": "Hardened Express backend with HTTPS/TLS and MongoDB (bcrypt passwords)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -19,7 +19,8 @@
     "jsonwebtoken": "^9.0.2",
     "hpp": "^0.2.3",
     "csrf-csrf": "^3.0.6",
-    "cookie-parser": "^1.4.7"
+    "cookie-parser": "^1.4.7",
+    "mongoose": "^8.8.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"

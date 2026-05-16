@@ -13,49 +13,42 @@ Project ini merupakan laboratorium keamanan jaringan berbasis container (Docker)
 |-------|----------------------|---------------------|
 | Protocol | HTTP (Plaintext) | HTTPS (TLS 1.2+) |
 | Credentials | Tidak terenkripsi | Terenkripsi |
-| Password Storage | Plaintext | bcrypt (salt: 12) |
+| Database | MongoDB (plaintext pwd) | MongoDB (bcrypt hash) |
+| Password Storage | Plaintext di DB | bcrypt (salt: 12) di DB |
 | Auth Token | Base64 sederhana | JWT (1h expiry) |
 | Security Headers | Tidak ada | Helmet (CSP, HSTS) |
 | Rate Limiting | Tidak ada | 5 percobaan/15 menit |
 | Input Validation | Tidak ada | express-validator |
+| Audit Log | Tidak ada | MongoDB audit_logs |
 
 ## 🏗️ Arsitektur
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     HOST (Attacker)                              │
-│   ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│   │ ARP Spoofer  │  │ Credential   │  │ Bettercap / Wireshark│  │
-│   │ (Scapy)      │  │ Sniffer      │  │ (MITM tools)         │  │
-│   └──────┬───────┘  └──────┬───────┘  └──────────┬───────────┘  │
-│          └────────┬────────┘                      │              │
-│                   │      Tailscale Network        │              │
-│   ┌───────────────┼──────────────────────────────┼──────────┐   │
-│   │               │  Docker Compose Environment  │          │   │
-│   │               │                              │          │   │
-│   │  ┌────────────┴────────────┐                 │          │   │
-│   │  │ Client Victim (webtop)  │◀── ARP Poison ──┘          │   │
-│   │  │ ┌────────────────────┐  │                            │   │
-│   │  │ │ Tailscale Sidecar  │  │   ← TS_AUTHKEY_CLIENT      │   │
-│   │  │ └────────────────────┘  │                            │   │
-│   │  │ ┌────────────────────┐  │                            │   │
-│   │  │ │ XFCE Desktop + 🌐  │  │   ← http://localhost:3080  │   │
-│   │  │ │ (Alpine webtop)    │  │                            │   │
-│   │  │ └────────────────────┘  │                            │   │
-│   │  └──────────┬──────────────┘                            │   │
-│   │             │ browses to                                │   │
-│   │  ┌──────────┴────────┐  ┌───────────────┐              │   │
-│   │  │ Vulnerable Stack  │  │ Secure Stack  │              │   │
-│   │  │ (Tailscale)       │  │ (Tailscale)   │              │   │
-│   │  │ ┌──────┐┌───────┐ │  │ ┌──────┐┌───┐│              │   │
-│   │  │ │React ││Express│ │  │ │React ││Exp.││              │   │
-│   │  │ │:3000 ││:5000  │ │  │ │:3443 ││5443││              │   │
-│   │  │ │ HTTP ││ HTTP  │ │  │ │HTTPS ││TLS ││              │   │
-│   │  │ └──────┘└───────┘ │  │ └──────┘└───┘│              │   │
-│   │  └───────────────────┘  └──────────────┘              │   │
-│   └───────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+  Docker Bridge Network (lab-network: 172.20.0.0/24) — Layer 2
+  ┌────────────────────────────────────────────────────────────────┐
+  │                                                                │
+  │  ┌─────────────────┐              ┌─────────────────────────┐  │
+  │  │ 🗡️ Attacker     │ ARP Spoof   │ 🎯 Client Victim        │  │
+  │  │ (Kali Linux)    │────────────▶│ (webtop XFCE)           │  │
+  │  │ 172.20.0.100    │              │ 172.20.0.10             │  │
+  │  └─────────────────┘              └──────────┬──────────────┘  │
+  │                                    ┌─────────┴─────────┐       │
+  │  ┌────────────────────┐     ┌──────┴──────┐    ┌───────┴─────┐ │
+  │  │ 🗄️ Database        │     │ 🔴 Vuln App │    │ 🟢 Sec App  │ │
+  │  │ (MongoDB)          │◀────│ HTTP        │    │ HTTPS (TLS) │ │
+  │  │ 172.20.0.50 :27017 │◀────│ .20 :3000   │    │ .30 :3443   │ │
+  │  │ ┌───────────────┐  │     │ .21 :5000   │    │ .31 :5443   │ │
+  │  │ │vulnerable_db  │  │     └─────────────┘    │ ┌─────────┐ │ │
+  │  │ │(PLAINTEXT pwd)│  │                        │ │Tailscale│ │ │
+  │  │ ├───────────────┤  │                        │ │(SSH/DB) │ │ │
+  │  │ │secure_db      │  │                        │ └─────────┘ │ │
+  │  │ │(BCRYPT hash)  │  │                        └─────────────┘ │
+  │  │ └───────────────┘  │                                        │
+  │  └────────────────────┘                                        │
+  └────────────────────────────────────────────────────────────────┘
 ```
+
+**Arsitektur Microservices:** Frontend, Backend, dan Database dipisahkan ke container masing-masing. Satu instance MongoDB melayani kedua aplikasi — perbedaan keamanan ada di **layer aplikasi** (bagaimana data disimpan dan ditransmisikan).
 
 ## 📂 Struktur File
 
@@ -96,8 +89,14 @@ Tugas Kelompok 5/
 │       └── certs/
 │           └── generate-certs.sh
 │
-├── attack-scripts/                 # Script Serangan
-│   ├── requirements.txt
+├── database/                       # MongoDB Database (Shared)
+│   └── init-mongo.js              # Init script (seed vulnerable_db + secure_db)
+│
+├── attacker/                       # Kali Linux Attacker Container
+│   ├── Dockerfile                 # Kali + scapy, bettercap, tshark
+│   └── requirements.txt
+│
+├── attack-scripts/                 # Script Serangan (mounted ke attacker)
 │   ├── arp_spoof.py               # ARP Spoofing (T1557.002)
 │   ├── sniff_credentials.py       # Credential Sniffing (T1040)
 │   ├── wireshark_filters.txt      # Referensi filter Wireshark
@@ -105,16 +104,12 @@ Tugas Kelompok 5/
 │       ├── mitm_attack.cap        # Caplet ARP Spoof + Sniff
 │       └── sniff_only.cap         # Caplet Sniff saja
 │
-├── tailscale/                      # Tailscale Configuration
-│   ├── vulnerable/
-│   │   ├── config/serve.json
-│   │   └── state/
-│   └── secure/
-│       ├── config/serve.json
-│       └── state/
+├── tailscale/                      # Tailscale (Secure Management Only)
+│   └── secure/state/
 │
 └── docs/
-    └── LAPORAN.md                  # Laporan Lengkap
+    ├── LAPORAN.md                  # Laporan Lengkap
+    └── PRESENTASI.html             # Slide Presentasi
 ```
 
 ## 🚀 Cara Menjalankan
@@ -122,120 +117,52 @@ Tugas Kelompok 5/
 ### Prasyarat
 
 - [Docker](https://docs.docker.com/get-docker/) & [Docker Compose](https://docs.docker.com/compose/install/)
-- [Tailscale Account](https://tailscale.com/) dengan auth keys
-- Python 3.8+ (untuk attack scripts di host)
-- `pip install scapy colorama` (untuk attack scripts)
-- [Wireshark](https://www.wireshark.org/download.html) (GUI packet analyzer + tshark CLI)
-- [Bettercap](https://www.bettercap.org/installation/) (MITM framework)
+- [Tailscale Account](https://tailscale.com/) — 1 auth key (opsional, untuk SSH management)
 
-### Langkah 1: Konfigurasi Environment
+### Langkah 1: Setup
 
 ```bash
-# Clone/navigate ke project
-cd "Tugas Kelompok 5"
-
-# Copy environment template
-cp .env.example .env
-
-# Edit .env dan masukkan Tailscale auth keys
-# Generate keys di: https://login.tailscale.com/admin/settings/keys
+cp .env.example .env    # Edit .env jika menggunakan Tailscale
+cd secure-app/backend/certs && bash generate-certs.sh && cd ../../..
+docker compose build && docker compose up -d
 ```
 
-### Langkah 2: Generate TLS Certificates (Secure App)
+### Langkah 2: Akses Client Victim
+
+Buka browser host → `http://localhost:3080` (desktop XFCE webtop)
+
+### Langkah 3: Jalankan Serangan (dari Kali Container)
 
 ```bash
-cd secure-app/backend/certs
-bash generate-certs.sh
-cd ../../..
+docker compose exec attacker bash
 ```
 
-### Langkah 3: Build & Start Containers
+#### Metode A: Scapy
 
 ```bash
-# Build semua images
-docker compose build
-
-# Start semua containers
-docker compose up -d
-
-# Cek status
-docker compose ps
+python3 arp_spoof.py -t 172.20.0.10 -g 172.20.0.20          # Terminal 1
+python3 sniff_credentials.py --mode http --port 5000          # Terminal 2
 ```
 
-### Langkah 4: Verifikasi Tailscale
+#### Metode B: Bettercap
 
 ```bash
-# Cek status Tailscale
-tailscale status
-
-# Catat IP Tailscale dari container:
-# vulnerable-app → 100.x.x.x
-# secure-app     → 100.x.x.y
+bettercap -iface eth0 -caplet bettercap/mitm_attack.cap
 ```
 
-### Langkah 5: Akses Aplikasi
-
-| Aplikasi | URL | Deskripsi |
-|----------|-----|-----------|
-| Vulnerable Frontend | `http://vulnerable-app:3000` | Login tanpa enkripsi |
-| Vulnerable Backend | `http://vulnerable-app:5000` | API tanpa enkripsi |
-| Secure Frontend | `https://secure-app:3443` | Login dengan TLS |
-| Secure Backend | `https://secure-app:5443` | API dengan TLS |
-
-### Langkah 6: Jalankan Serangan (dari Host)
-
-Tersedia **3 metode** serangan. Lihat `docs/LAPORAN.md` Section 3.5 untuk panduan lengkap.
-
-#### Metode A: Scapy + Python Sniffer
+#### Metode C: tshark
 
 ```bash
-cd attack-scripts
-pip install -r requirements.txt
-
-# Terminal 1: ARP Spoofing (target = client-victim, gateway = server)
-sudo python3 arp_spoof.py -t <CLIENT_VICTIM_IP> -g <VULNERABLE_APP_IP>
-
-# Terminal 2: Sniff HTTP credentials
-sudo python3 sniff_credentials.py --mode http --port 5000
+python3 arp_spoof.py -t 172.20.0.10 -g 172.20.0.20          # Terminal 1
+tshark -i eth0 -f "arp or port 5000 or port 5443" -w /tmp/capture.pcap  # Terminal 2
 ```
 
-#### Metode B: Bettercap (All-in-One MITM)
+### Langkah 4: Demo Login
 
-```bash
-# Jalankan Bettercap pada interface Tailscale
-sudo bettercap -iface tailscale0 -caplet bettercap/mitm_attack.cap
-```
-
-#### Metode C: Scapy + Wireshark
-
-```bash
-# Terminal 1: ARP Spoofing
-sudo python3 arp_spoof.py -t <CLIENT_VICTIM_IP> -g <VULNERABLE_APP_IP>
-
-# Terminal 2: Buka Wireshark GUI
-wireshark &
-# → Pilih interface tailscale0
-# → Set capture filter: arp or port 5000 or port 5443
-```
-
-### Langkah 7: Analisis dengan Wireshark
-
-1. Buka file capture (dari Bettercap atau tshark) di Wireshark
-2. Gunakan filter dari `wireshark_filters.txt`:
-   - **Deteksi ARP Spoofing**: `arp.opcode == 2`
-   - **Lihat kredensial HTTP**: `http.request.method == "POST"` → klik kanan → **Follow → HTTP Stream**
-   - **Verifikasi HTTPS aman**: `tcp.port == 5443 && tls` → data terenkripsi
-3. Bandingkan: HTTP traffic **plaintext** vs HTTPS traffic **encrypted**
-
-### Langkah 8: Demo Login
-
-1. Buka browser → akses `http://vulnerable-app:3000`
-2. Login dengan: `admin` / `admin123`
-3. Lihat terminal sniffer/Bettercap → **kredensial tertangkap dalam plaintext!**
-4. Buka Wireshark → Follow HTTP Stream → **username & password terbaca!**
-5. Buka browser → akses `https://secure-app:3443`
-6. Login dengan credentials yang sama
-7. Lihat Wireshark → **data terenkripsi TLS, tidak terbaca!**
+1. Di webtop, buka `http://172.20.0.20:3000` → login `admin` / `admin123`
+2. Terminal attacker → **kredensial tertangkap plaintext!**
+3. Di webtop, buka `https://172.20.0.30:3443` → login sama
+4. Terminal attacker → **data terenkripsi TLS, tidak terbaca!**
 
 ## 🔬 Referensi MITRE ATT&CK
 

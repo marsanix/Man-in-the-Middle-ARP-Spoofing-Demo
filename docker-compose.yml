@@ -1,68 +1,130 @@
 # =============================================================================
-# Docker Compose - Network Security Lab
+# Docker Compose - Network Security Lab (Microservices Architecture)
 # Man-in-the-Middle (MITM) & ARP Spoofing Attack Demonstration
 # =============================================================================
-# Tugas Mata Kuliah: Network Programming & Administration
-# Kelompok: 5
-#
 # Architecture:
-#   Host (Attacker) ──ARP Spoofing──▶ Client Victim (webtop)
-#                                          │
-#                                     Tailscale Network
-#                                          │
-#                              ┌───────────┴───────────┐
-#                       vulnerable-app            secure-app
+#   Docker Bridge (lab-network: 172.20.0.0/24) — Layer 2 broadcast domain
 #
-# Nodes on Tailnet:
-#   1. Host         (Attacker)  — sudah login Tailscale
-#   2. ts-vulnerable (Server)   — TS_AUTHKEY_VULNERABLE
-#   3. ts-secure     (Server)   — TS_AUTHKEY_SECURE
-#   4. ts-client     (Victim)   — TS_AUTHKEY_CLIENT
+#   ┌── Microservices ──────────────────────────────────────────────────┐
+#   │                                                                   │
+#   │  DATABASE (Shared)                                                │
+#   │    └── database       172.20.0.50  (MongoDB — shared instance)    │
+#   │         ├── vulnerable_db  → passwords stored PLAINTEXT           │
+#   │         └── secure_db      → passwords stored BCRYPT HASH         │
+#   │                                                                   │
+#   │  VULNERABLE STACK (HTTP — No Encryption)                          │
+#   │    ├── vuln-frontend  172.20.0.20  (React — port 3000)            │
+#   │    └── vuln-backend   172.20.0.21  (Express HTTP — port 5000)     │
+#   │         └── connects to database:27017/vulnerable_db              │
+#   │                                                                   │
+#   │  SECURE STACK (HTTPS — TLS Encrypted)                             │
+#   │    ├── sec-frontend   172.20.0.30  (React — port 3443)            │
+#   │    └── sec-backend    172.20.0.31  (Express HTTPS — port 5443)    │
+#   │         └── connects to database:27017/secure_db                  │
+#   │                                                                   │
+#   │  ATTACKER                                                         │
+#   │    └── attacker       172.20.0.100 (Kali Linux + attack tools)    │
+#   │                                                                   │
+#   │  CLIENT VICTIM                                                    │
+#   │    └── client-victim  172.20.0.10  (webtop XFCE desktop)          │
+#   │                                                                   │
+#   │  MANAGEMENT                                                       │
+#   │    └── ts-secure      (shared)     (Tailscale VPN — SSH/DB)       │
+#   └───────────────────────────────────────────────────────────────────┘
 #
-# MITRE ATT&CK: T1557 (AiTM), T1557.002 (ARP Cache Poisoning), T1040 (Network Sniffing)
-# OWASP Top 10:2025: A04 (Cryptographic Failures), A02 (Security Misconfiguration)
+# MITRE ATT&CK: T1557.002 (ARP Cache Poisoning), T1040 (Network Sniffing)
 # =============================================================================
 
 services:
   # ===========================================================================
-  # VULNERABLE STACK (HTTP - No Encryption)
+  # DATABASE (MongoDB — Shared by Both Apps)
   # ===========================================================================
-
-  # Tailscale sidecar for vulnerable stack
-  tailscale-vulnerable:
-    image: tailscale/tailscale:latest
-    container_name: ts-vulnerable
-    hostname: vulnerable-app
-    environment:
-      - TS_AUTHKEY=${TS_AUTHKEY_VULNERABLE}
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_EXTRA_ARGS=--advertise-tags=tag:vulnerable
-      - TS_SERVE_CONFIG=/config/serve.json
+  # Satu instance MongoDB dengan 2 database:
+  #   - vulnerable_db: password PLAINTEXT (demonstrasi OWASP A04:2025)
+  #   - secure_db:     password BCRYPT HASH (solusi keamanan)
+  #
+  # Ini mendemonstrasikan bahwa keamanan data bukan hanya soal infrastruktur
+  # database yang sama, tetapi bagaimana APLIKASI memperlakukan data sensitif.
+  # ===========================================================================
+  database:
+    image: mongo:7
+    container_name: database
+    hostname: database
     volumes:
-      - ./tailscale/vulnerable/state:/var/lib/tailscale
-      - ./tailscale/vulnerable/config:/config
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - net_admin
-      - sys_module
+      - mongodb_data:/data/db
+      - ./database/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    environment:
+      - MONGO_INITDB_DATABASE=vulnerable_db
     restart: unless-stopped
     networks:
-      - lab-network
+      lab-network:
+        ipv4_address: 172.20.0.50
 
-  # Vulnerable Frontend (React - HTTP)
+  # ===========================================================================
+  # ATTACKER (Kali Linux + Custom Tools)
+  # ===========================================================================
+  attacker:
+    build:
+      context: ./attacker
+      dockerfile: Dockerfile
+    container_name: attacker
+    hostname: attacker
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./attack-scripts:/opt/attack-scripts
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    depends_on:
+      - database
+    networks:
+      lab-network:
+        ipv4_address: 172.20.0.100
+
+  # ===========================================================================
+  # CLIENT VICTIM (Desktop GUI — Target of MITM Attack)
+  # Akses GUI: http://localhost:3080
+  # ===========================================================================
+  client-victim:
+    image: linuxserver/webtop:alpine-xfce
+    container_name: client-victim
+    hostname: client-victim
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Jakarta
+    ports:
+      - "3080:3000"
+    shm_size: "1gb"
+    restart: unless-stopped
+    depends_on:
+      - vulnerable-frontend
+      - secure-frontend
+    networks:
+      lab-network:
+        ipv4_address: 172.20.0.10
+
+  # ===========================================================================
+  # VULNERABLE STACK (HTTP — No Encryption)
+  # Frontend: React (port 3000) → Backend: Express HTTP (port 5000) → MongoDB
+  # ===========================================================================
   vulnerable-frontend:
     build:
       context: ./vulnerable-app/frontend
       dockerfile: Dockerfile
     container_name: vuln-frontend
+    hostname: vulnerable-app
     environment:
       - REACT_APP_API_URL=http://vulnerable-app:5000
-    network_mode: service:tailscale-vulnerable
     depends_on:
-      - tailscale-vulnerable
+      - vulnerable-backend
     restart: unless-stopped
+    networks:
+      lab-network:
+        ipv4_address: 172.20.0.20
 
-  # Vulnerable Backend (Express - HTTP)
   vulnerable-backend:
     build:
       context: ./vulnerable-app/backend
@@ -71,50 +133,33 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=5000
-    network_mode: service:tailscale-vulnerable
+      - MONGO_URI=mongodb://database:27017/vulnerable_db
     depends_on:
-      - tailscale-vulnerable
-    restart: unless-stopped
-
-  # ===========================================================================
-  # SECURE STACK (HTTPS - TLS Encrypted)
-  # ===========================================================================
-
-  # Tailscale sidecar for secure stack
-  tailscale-secure:
-    image: tailscale/tailscale:latest
-    container_name: ts-secure
-    hostname: secure-app
-    environment:
-      - TS_AUTHKEY=${TS_AUTHKEY_SECURE}
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_EXTRA_ARGS=--advertise-tags=tag:secure
-      - TS_SERVE_CONFIG=/config/serve.json
-    volumes:
-      - ./tailscale/secure/state:/var/lib/tailscale
-      - ./tailscale/secure/config:/config
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - net_admin
-      - sys_module
+      - database
     restart: unless-stopped
     networks:
-      - lab-network
+      lab-network:
+        ipv4_address: 172.20.0.21
 
-  # Secure Frontend (React - HTTPS)
+  # ===========================================================================
+  # SECURE STACK (HTTPS — TLS Encrypted)
+  # Frontend: React (port 3443) → Backend: Express HTTPS (port 5443) → MongoDB
+  # ===========================================================================
   secure-frontend:
     build:
       context: ./secure-app/frontend
       dockerfile: Dockerfile
     container_name: sec-frontend
+    hostname: secure-app
     environment:
       - REACT_APP_API_URL=https://secure-app:5443
-    network_mode: service:tailscale-secure
     depends_on:
-      - tailscale-secure
+      - secure-backend
     restart: unless-stopped
+    networks:
+      lab-network:
+        ipv4_address: 172.20.0.30
 
-  # Secure Backend (Express - HTTPS)
   secure-backend:
     build:
       context: ./secure-app/backend
@@ -125,62 +170,48 @@ services:
       - PORT=5443
       - JWT_SECRET=${JWT_SECRET:-super-secret-jwt-key-change-in-production}
       - ALLOWED_ORIGIN=https://secure-app:3443
-    network_mode: service:tailscale-secure
+      - MONGO_URI=mongodb://database:27017/secure_db
     depends_on:
-      - tailscale-secure
+      - database
     restart: unless-stopped
+    networks:
+      lab-network:
+        ipv4_address: 172.20.0.31
 
   # ===========================================================================
-  # CLIENT VICTIM STACK (Desktop GUI - Target of MITM Attack)
+  # TAILSCALE VPN — Secure Management Plane (SSH & DB Access)
+  # Demonstrasi: akses management server via WireGuard tunnel,
+  # sehingga tidak terekspos di bridge network yang rentan ARP Spoofing.
   # ===========================================================================
-  # Kontainer ini mensimulasikan komputer korban yang mengakses aplikasi web.
-  # Host (Attacker) melakukan ARP Spoofing antara client-victim dan server,
-  # sehingga traffic dari client melewati attacker.
-  #
-  # Akses GUI webtop dari browser host: http://localhost:3080
-  # ===========================================================================
-
-  # Tailscale sidecar for client victim
-  tailscale-client:
+  tailscale-secure:
     image: tailscale/tailscale:latest
-    container_name: ts-client
-    hostname: client-victim
+    container_name: ts-secure
+    hostname: secure-mgmt
     environment:
-      - TS_AUTHKEY=${TS_AUTHKEY_CLIENT}
+      - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_STATE_DIR=/var/lib/tailscale
-      - TS_EXTRA_ARGS=--advertise-tags=tag:client
+      - TS_EXTRA_ARGS=--advertise-tags=tag:secure
     volumes:
-      - ./tailscale/client/state:/var/lib/tailscale
+      - ./tailscale/secure/state:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
     cap_add:
       - net_admin
       - sys_module
-    ports:
-      # Webtop GUI exposed to host browser
-      # Akses via: http://localhost:3080
-      - "3080:3000"
-    restart: unless-stopped
-    networks:
-      - lab-network
-
-  # Client Victim Desktop (XFCE GUI with Browser)
-  # Image: linuxserver/webtop — Alpine Linux with XFCE desktop, accessible via browser
-  client-victim:
-    image: linuxserver/webtop:alpine-xfce
-    container_name: client-victim
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Asia/Jakarta
-    # Share network namespace with Tailscale sidecar
-    # → client-victim memiliki IP Tailscale dari ts-client
-    network_mode: service:tailscale-client
+    network_mode: service:secure-backend
     depends_on:
-      - tailscale-client
-    # Shared memory untuk browser agar tidak crash
-    shm_size: "1gb"
+      - secure-backend
     restart: unless-stopped
 
+# ===========================================================================
+# VOLUMES
+# ===========================================================================
+volumes:
+  mongodb_data:
+    driver: local
+
+# ===========================================================================
+# NETWORKS
+# ===========================================================================
 networks:
   lab-network:
     driver: bridge

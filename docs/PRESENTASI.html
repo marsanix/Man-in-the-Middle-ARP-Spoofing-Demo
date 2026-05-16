@@ -196,49 +196,55 @@
 <tr><td>JWT</td><td>Application</td><td>❌ Base64</td><td>✅ HMAC-signed</td></tr>
 <tr><td>Bcrypt</td><td>Application</td><td>❌ Plaintext</td><td>✅ Cost=12</td></tr>
 <tr><td>Headers</td><td>Application</td><td>❌ Tidak ada</td><td>✅ Helmet</td></tr>
+<tr><td>MongoDB</td><td>Data</td><td>❌ Plaintext pwd</td><td>✅ Bcrypt hash</td></tr>
 </table>
 </section>
 
 <!-- SLIDE 9: Architecture -->
 <section>
-<h2>3. Arsitektur Sistem</h2>
+<h2>3. Arsitektur Microservices</h2>
+<p class="subtitle">Docker Bridge (Layer 2) + MongoDB (Shared) + Tailscale Management</p>
 <pre class="ascii-art" style="font-size:0.38em;">
-┌─────────────────────────────────────────────────────────────────┐
-│                     HOST (Attacker)                              │
-│   ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│   │ ARP Spoofer  │  │ Credential   │  │ Bettercap / Wireshark│  │
-│   │ (Scapy)      │  │ Sniffer      │  │ (MITM tools)         │  │
-│   └──────┬───────┘  └──────┬───────┘  └──────────┬───────────┘  │
-│          └────────┬────────┘                      │              │
-│                   │      Tailscale Network        │              │
-│   ┌───────────────┼──────────────────────────────┼──────────┐   │
-│   │  ┌────────────┴────────────┐                 │          │   │
-│   │  │ Client Victim (webtop)  │◀── ARP Poison ──┘          │   │
-│   │  │   XFCE Desktop + 🌐     │  ← http://localhost:3080   │   │
-│   │  └──────────┬──────────────┘                            │   │
-│   │             │ browses to                                │   │
-│   │  ┌──────────┴────────┐  ┌───────────────┐              │   │
-│   │  │ Vulnerable Stack  │  │ Secure Stack  │              │   │
-│   │  │ React:3000 | :5000│  │ React:3443|5443│             │   │
-│   │  │     HTTP          │  │    HTTPS/TLS   │             │   │
-│   │  └───────────────────┘  └────────────────┘             │   │
-│   └────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘</pre>
+  Docker Bridge (lab-network: 172.20.0.0/24) — Layer 2 Broadcast Domain
+  ┌────────────────────────────────────────────────────────────────┐
+  │  ┌─────────────────┐              ┌─────────────────────────┐  │
+  │  │ Attacker         │ ARP Spoof   │ Client Victim           │  │
+  │  │ (Kali Linux)    │────────────▶│ (webtop XFCE)           │  │
+  │  │ 172.20.0.100    │              │ 172.20.0.10             │  │
+  │  └─────────────────┘              └──────────┬──────────────┘  │
+  │                                    ┌─────────┴─────────┐       │
+  │  ┌────────────────────┐     ┌──────┴──────┐    ┌───────┴─────┐ │
+  │  │ Database (Shared)  │     │ Vuln App    │    │ Sec App     │ │
+  │  │ (MongoDB)          │◀────│ HTTP        │    │ HTTPS (TLS) │ │
+  │  │ 172.20.0.50 :27017 │◀────│ .20 :3000   │    │ .30 :3443   │ │
+  │  │ ┌───────────────┐  │     │ .21 :5000   │    │ .31 :5443   │ │
+  │  │ │vulnerable_db  │  │     └─────────────┘    │ ┌─────────┐ │ │
+  │  │ │(PLAINTEXT pwd)│  │                        │ │Tailscale│ │ │
+  │  │ ├───────────────┤  │                        │ │(SSH/DB) │ │ │
+  │  │ │secure_db      │  │                        │ └─────────┘ │ │
+  │  │ │(BCRYPT hash)  │  │                        └─────────────┘ │
+  │  │ └───────────────┘  │                                        │
+  │  └────────────────────┘                                        │
+  └────────────────────────────────────────────────────────────────┘</pre>
 </section>
 
 <!-- SLIDE 10: Nodes -->
 <section>
-<h2>Tailscale Network — 4 Node</h2>
+<h2>Docker Bridge — Container Map</h2>
 <table>
-<tr><th>Node</th><th>Container</th><th>Peran</th><th>Auth Key</th></tr>
-<tr><td>Host</td><td>—</td><td>🗡️ Attacker</td><td>Login manual</td></tr>
-<tr><td>ts-client</td><td>webtop XFCE</td><td>🎯 Victim (browsing)</td><td>TS_AUTHKEY_CLIENT</td></tr>
-<tr><td>ts-vulnerable</td><td>React + Express</td><td>🔴 Server HTTP</td><td>TS_AUTHKEY_VULNERABLE</td></tr>
-<tr><td>ts-secure</td><td>React + Express</td><td>🟢 Server HTTPS</td><td>TS_AUTHKEY_SECURE</td></tr>
+<tr><th>Container</th><th>IP</th><th>Port</th><th>Peran</th></tr>
+<tr><td>database</td><td>172.20.0.50</td><td>27017</td><td>🗄️ MongoDB (shared)</td></tr>
+<tr><td>attacker</td><td>172.20.0.100</td><td>—</td><td>🗡️ Kali Linux (MITM)</td></tr>
+<tr><td>client-victim</td><td>172.20.0.10</td><td>3080→3000</td><td>🎯 Victim desktop</td></tr>
+<tr><td>vuln-frontend</td><td>172.20.0.20</td><td>3000</td><td>🔴 HTTP frontend</td></tr>
+<tr><td>vuln-backend</td><td>172.20.0.21</td><td>5000</td><td>🔴 HTTP → vulnerable_db</td></tr>
+<tr><td>sec-frontend</td><td>172.20.0.30</td><td>3443</td><td>🟢 HTTPS frontend</td></tr>
+<tr><td>sec-backend</td><td>172.20.0.31</td><td>5443</td><td>🟢 HTTPS → secure_db</td></tr>
+<tr><td>ts-secure</td><td>(shared)</td><td>—</td><td>🔒 Tailscale (SSH/DB)</td></tr>
 </table>
 <br>
 <div class="box" style="font-size:0.7em;">
-<strong>Alur:</strong> Victim (webtop) browsing ke server → Attacker (host) ARP Spoofing antara victim & server → Traffic melewati attacker
+<strong>Mengapa Docker Bridge?</strong> Layer 2 broadcast domain — ARP packets dapat dikirim/diterima antar container. Tailscale (Layer 3) tidak mendukung ARP.
 </div>
 </section>
 
@@ -249,19 +255,23 @@
 <div class="box">
 <h3>A. Scapy + Sniffer</h3>
 <p style="font-size:0.7em;">Python script custom</p>
-<pre><code class="bash" style="font-size:0.9em;"># Terminal 1
-sudo python3 arp_spoof.py \
-  -t $VICTIM -g $SERVER
+<pre><code class="bash" style="font-size:0.9em;">docker compose exec attacker bash
+
+# Terminal 1
+python3 arp_spoof.py \
+  -t 172.20.0.10 -g 172.20.0.20
 
 # Terminal 2
-sudo python3 sniff_credentials.py \
+python3 sniff_credentials.py \
   --mode http --port 5000</code></pre>
 </div>
 <div class="box">
 <h3>B. Bettercap</h3>
 <p style="font-size:0.7em;">All-in-one MITM</p>
-<pre><code class="bash" style="font-size:0.9em;">sudo bettercap \
-  -iface tailscale0 \
+<pre><code class="bash" style="font-size:0.9em;">docker compose exec attacker bash
+
+bettercap \
+  -iface eth0 \
   -caplet mitm_attack.cap
 
 # Auto: ARP Spoof
@@ -269,15 +279,17 @@ sudo python3 sniff_credentials.py \
 #     + Credential sniff</code></pre>
 </div>
 <div class="box">
-<h3>C. Wireshark</h3>
-<p style="font-size:0.7em;">Visual packet analysis</p>
-<pre><code class="bash" style="font-size:0.9em;"># ARP Spoof + Wireshark
-wireshark &
-# Interface: tailscale0
-# Filter:
-#   arp or port 5000
-#   or port 5443
-# Follow → HTTP Stream</code></pre>
+<h3>C. tshark</h3>
+<p style="font-size:0.7em;">CLI packet capture</p>
+<pre><code class="bash" style="font-size:0.9em;">docker compose exec attacker bash
+
+# Terminal 1: ARP Spoof
+python3 arp_spoof.py \
+  -t 172.20.0.10 -g 172.20.0.20
+
+# Terminal 2: Capture
+tshark -i eth0 \
+  -w /tmp/capture.pcap</code></pre>
 </div>
 </div>
 </section>
@@ -289,7 +301,7 @@ wireshark &
 <pre><code class="plaintext" style="font-size:0.85em;">╔══════════════════════════════════════╗
 ║  KREDENSIAL DITEMUKAN (PLAINTEXT)!   ║
 ╠══════════════════════════════════════╣
-║  Source: 100.x.x.4 → 100.x.x.2     ║
+║  Source: 172.20.0.10 → 172.20.0.20  ║
 ║  URL: POST /api/login                ║
 ║  Username: admin                     ║
 ║  Password: admin123        ← TERBACA!║
@@ -325,6 +337,7 @@ Wireshark: TLSv1.3 Application Data [encrypted]
 <tr><td>Username</td><td class="highlight-red">✅ Terlihat</td><td class="highlight-green">❌ Tidak</td></tr>
 <tr><td>Password</td><td class="highlight-red">✅ Terlihat</td><td class="highlight-green">❌ Tidak</td></tr>
 <tr><td>Session Hijack</td><td class="highlight-red">✅ Mudah</td><td class="highlight-green">❌ Sulit (JWT)</td></tr>
+<tr><td>Password di DB</td><td class="highlight-red">❌ Plaintext</td><td class="highlight-green">✅ Bcrypt hash</td></tr>
 </table>
 </section>
 
@@ -333,7 +346,7 @@ Wireshark: TLSv1.3 Application Data [encrypted]
 <h2>6. Solusi Keamanan</h2>
 <div class="cols">
 <div class="box">
-<h3>🔒 Transport Layer</h3>
+<h3>🔒 Transport</h3>
 <ul style="font-size:0.75em;">
 <li>TLS/HTTPS (OpenSSL)</li>
 <li>HSTS (max-age=1yr)</li>
@@ -341,21 +354,29 @@ Wireshark: TLSv1.3 Application Data [encrypted]
 </ul>
 </div>
 <div class="box">
-<h3>🛡️ Application Layer</h3>
+<h3>🛡️ Application</h3>
 <ul style="font-size:0.75em;">
 <li>bcrypt (cost=12)</li>
 <li>JWT (1h expiry)</li>
 <li>Helmet (CSP, X-Frame)</li>
-<li>Rate Limiting</li>
+<li>Rate Limiting, Audit Log</li>
 </ul>
 </div>
 <div class="box">
-<h3>🌐 Network Layer</h3>
+<h3>🗄️ Data</h3>
 <ul style="font-size:0.75em;">
-<li>Static ARP Entries</li>
-<li>Dynamic ARP Inspection</li>
-<li>VLAN Segmentation</li>
+<li>MongoDB (shared instance)</li>
+<li>vulnerable_db: plaintext</li>
+<li>secure_db: bcrypt hash</li>
+<li>Schema validation, TTL</li>
+</ul>
+</div>
+<div class="box">
+<h3>🌐 Network</h3>
+<ul style="font-size:0.75em;">
+<li>Static ARP / DAI</li>
 <li>VPN (Tailscale)</li>
+<li>VLAN Segmentation</li>
 </ul>
 </div>
 </div>
@@ -368,7 +389,8 @@ Wireshark: TLSv1.3 Application Data [encrypted]
 <li style="margin-bottom:12px;"><strong>ARP Spoofing tetap ancaman nyata</strong> — protokol ARP stateless tanpa autentikasi [RFC 826]</li>
 <li style="margin-bottom:12px;"><strong>HTTP sangat rentan</strong> — credential terbaca plaintext saat MITM (OWASP A04:2025)</li>
 <li style="margin-bottom:12px;"><strong>HTTPS/TLS efektif</strong> — meskipun ARP Spoofing berhasil, data tetap terenkripsi</li>
-<li style="margin-bottom:12px;"><strong>Defense in Depth</strong> — diperlukan perlindungan di semua layer (Network + Transport + Application)</li>
+<li style="margin-bottom:12px;"><strong>Defense in Depth (4 Layer)</strong> — Network + Transport + Application + Data</li>
+<li style="margin-bottom:12px;"><strong>Keamanan = layer aplikasi</strong> — DB sama (MongoDB), tapi password plaintext vs bcrypt hash</li>
 <li><strong>Container networking perlu perhatian</strong> — Docker bridge default rentan ARP spoofing</li>
 </ol>
 </section>

