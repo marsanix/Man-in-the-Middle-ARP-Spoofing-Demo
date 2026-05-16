@@ -1,0 +1,19 @@
+{
+  "TCP": {
+    "443": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "secure-app.tail-scale.ts.net:443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "https://127.0.0.1:3443"
+        },
+        "/api/": {
+          "Proxy": "https://127.0.0.1:5443"
+        }
+      }
+    }
+  }
+}

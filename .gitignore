@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.log
+tailscale/*/state/*
+secure-app/backend/certs/server.key
+secure-app/backend/certs/server.crt
+dist/
+build/
+.DS_Store
+Thumbs.db

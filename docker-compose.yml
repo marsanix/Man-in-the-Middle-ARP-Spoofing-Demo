@@ -1,0 +1,190 @@
+# =============================================================================
+# Docker Compose - Network Security Lab
+# Man-in-the-Middle (MITM) & ARP Spoofing Attack Demonstration
+# =============================================================================
+# Tugas Mata Kuliah: Network Programming & Administration
+# Kelompok: 5
+#
+# Architecture:
+#   Host (Attacker) ──ARP Spoofing──▶ Client Victim (webtop)
+#                                          │
+#                                     Tailscale Network
+#                                          │
+#                              ┌───────────┴───────────┐
+#                       vulnerable-app            secure-app
+#
+# Nodes on Tailnet:
+#   1. Host         (Attacker)  — sudah login Tailscale
+#   2. ts-vulnerable (Server)   — TS_AUTHKEY_VULNERABLE
+#   3. ts-secure     (Server)   — TS_AUTHKEY_SECURE
+#   4. ts-client     (Victim)   — TS_AUTHKEY_CLIENT
+#
+# MITRE ATT&CK: T1557 (AiTM), T1557.002 (ARP Cache Poisoning), T1040 (Network Sniffing)
+# OWASP Top 10:2025: A04 (Cryptographic Failures), A02 (Security Misconfiguration)
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # VULNERABLE STACK (HTTP - No Encryption)
+  # ===========================================================================
+
+  # Tailscale sidecar for vulnerable stack
+  tailscale-vulnerable:
+    image: tailscale/tailscale:latest
+    container_name: ts-vulnerable
+    hostname: vulnerable-app
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY_VULNERABLE}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_EXTRA_ARGS=--advertise-tags=tag:vulnerable
+      - TS_SERVE_CONFIG=/config/serve.json
+    volumes:
+      - ./tailscale/vulnerable/state:/var/lib/tailscale
+      - ./tailscale/vulnerable/config:/config
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - sys_module
+    restart: unless-stopped
+    networks:
+      - lab-network
+
+  # Vulnerable Frontend (React - HTTP)
+  vulnerable-frontend:
+    build:
+      context: ./vulnerable-app/frontend
+      dockerfile: Dockerfile
+    container_name: vuln-frontend
+    environment:
+      - REACT_APP_API_URL=http://vulnerable-app:5000
+    network_mode: service:tailscale-vulnerable
+    depends_on:
+      - tailscale-vulnerable
+    restart: unless-stopped
+
+  # Vulnerable Backend (Express - HTTP)
+  vulnerable-backend:
+    build:
+      context: ./vulnerable-app/backend
+      dockerfile: Dockerfile
+    container_name: vuln-backend
+    environment:
+      - NODE_ENV=development
+      - PORT=5000
+    network_mode: service:tailscale-vulnerable
+    depends_on:
+      - tailscale-vulnerable
+    restart: unless-stopped
+
+  # ===========================================================================
+  # SECURE STACK (HTTPS - TLS Encrypted)
+  # ===========================================================================
+
+  # Tailscale sidecar for secure stack
+  tailscale-secure:
+    image: tailscale/tailscale:latest
+    container_name: ts-secure
+    hostname: secure-app
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY_SECURE}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_EXTRA_ARGS=--advertise-tags=tag:secure
+      - TS_SERVE_CONFIG=/config/serve.json
+    volumes:
+      - ./tailscale/secure/state:/var/lib/tailscale
+      - ./tailscale/secure/config:/config
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - sys_module
+    restart: unless-stopped
+    networks:
+      - lab-network
+
+  # Secure Frontend (React - HTTPS)
+  secure-frontend:
+    build:
+      context: ./secure-app/frontend
+      dockerfile: Dockerfile
+    container_name: sec-frontend
+    environment:
+      - REACT_APP_API_URL=https://secure-app:5443
+    network_mode: service:tailscale-secure
+    depends_on:
+      - tailscale-secure
+    restart: unless-stopped
+
+  # Secure Backend (Express - HTTPS)
+  secure-backend:
+    build:
+      context: ./secure-app/backend
+      dockerfile: Dockerfile
+    container_name: sec-backend
+    environment:
+      - NODE_ENV=production
+      - PORT=5443
+      - JWT_SECRET=${JWT_SECRET:-super-secret-jwt-key-change-in-production}
+      - ALLOWED_ORIGIN=https://secure-app:3443
+    network_mode: service:tailscale-secure
+    depends_on:
+      - tailscale-secure
+    restart: unless-stopped
+
+  # ===========================================================================
+  # CLIENT VICTIM STACK (Desktop GUI - Target of MITM Attack)
+  # ===========================================================================
+  # Kontainer ini mensimulasikan komputer korban yang mengakses aplikasi web.
+  # Host (Attacker) melakukan ARP Spoofing antara client-victim dan server,
+  # sehingga traffic dari client melewati attacker.
+  #
+  # Akses GUI webtop dari browser host: http://localhost:3080
+  # ===========================================================================
+
+  # Tailscale sidecar for client victim
+  tailscale-client:
+    image: tailscale/tailscale:latest
+    container_name: ts-client
+    hostname: client-victim
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY_CLIENT}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_EXTRA_ARGS=--advertise-tags=tag:client
+    volumes:
+      - ./tailscale/client/state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - sys_module
+    ports:
+      # Webtop GUI exposed to host browser
+      # Akses via: http://localhost:3080
+      - "3080:3000"
+    restart: unless-stopped
+    networks:
+      - lab-network
+
+  # Client Victim Desktop (XFCE GUI with Browser)
+  # Image: linuxserver/webtop — Alpine Linux with XFCE desktop, accessible via browser
+  client-victim:
+    image: linuxserver/webtop:alpine-xfce
+    container_name: client-victim
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Jakarta
+    # Share network namespace with Tailscale sidecar
+    # → client-victim memiliki IP Tailscale dari ts-client
+    network_mode: service:tailscale-client
+    depends_on:
+      - tailscale-client
+    # Shared memory untuk browser agar tidak crash
+    shm_size: "1gb"
+    restart: unless-stopped
+
+networks:
+  lab-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
