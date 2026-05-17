@@ -1,7 +1,7 @@
-FROM node:20-alpine
+FROM node:20-slim
 
 # Install openssl for certificate generation
-RUN apk add --no-cache openssl bash
+RUN apt-get update && apt-get install -y openssl bash && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

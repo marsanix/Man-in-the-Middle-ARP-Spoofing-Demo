@@ -14,7 +14,7 @@ import './App.css';
  * - No CSRF protection
  */
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_URL = process.env.REACT_APP_API_URL || 'http://vuln-backend:5000';
 
 function App() {
   const [username, setUsername] = useState('');

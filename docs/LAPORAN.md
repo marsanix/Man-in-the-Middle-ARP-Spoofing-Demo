@@ -518,21 +518,24 @@ Sistem menggunakan **Docker bridge network** (Layer 2) sebagai broadcast domain 
   │  │ Attacker         │ ARP Spoof   │ Client Victim           │  │
   │  │ (Kali Linux)    │────────────▶│ (webtop XFCE)           │  │
   │  │ 172.20.0.100    │              │ 172.20.0.10             │  │
-  │  └─────────────────┘              └──────────┬──────────────┘  │
-  │                                    ┌─────────┴─────────┐       │
-  │  ┌────────────────────┐     ┌──────┴──────┐    ┌───────┴─────┐ │
-  │  │ Database (Shared)  │     │ Vuln App    │    │ Sec App     │ │
-  │  │ (MongoDB)          │◀────│ HTTP        │    │ HTTPS (TLS) │ │
-  │  │ 172.20.0.50 :27017 │◀────│ .20 :3000   │    │ .30 :3443   │ │
-  │  │ ┌───────────────┐  │     │ .21 :5000   │    │ .31 :5443   │ │
-  │  │ │vulnerable_db  │  │     └─────────────┘    │ ┌─────────┐ │ │
-  │  │ │(PLAINTEXT pwd)│  │                        │ │Tailscale│ │ │
-  │  │ ├───────────────┤  │                        │ │(SSH/DB) │ │ │
-  │  │ │secure_db      │  │                        │ └─────────┘ │ │
-  │  │ │(BCRYPT hash)  │  │                        └─────────────┘ │
-  │  │ └───────────────┘  │                                        │
-  │  └────────────────────┘                                        │
-  └────────────────────────────────────────────────────────────────┘
+  │  └─────────────────┘              │ ┌─────────────────────┐ │  │
+  │                                    │ │ ts-client           │ │  │
+  │                                    │ └─────────────────────┘ │  │
+  │                                    └─────────┬───────────────┘  │
+  │                                              │                  │
+  │  ┌────────────────────┐     ┌────────────────┴──────────────┐   │
+  │  │ Database (Shared)  │     │ Vuln App         Sec App      │   │
+  │  │ (MongoDB)          │◀────│ HTTP             HTTPS (TLS)  │   │
+  │  │ 172.20.0.50 :27017 │◀────│ .20 :3000        .30 :3443    │   │
+  │  │ ┌───────────────┐  │     │ .21 :5000        .31 :5443    │   │
+  │  │ │vulnerable_db  │  │     └──────────────────┬────────────┘   │
+  │  │ ├───────────────┤  │                        │ ┌──────────┐   │
+  │  │ │secure_db      │◀─┼─(Tailscale tunnel)─────┼─│ts-backend│   │
+  │  │ ├───────────────┤  │                        │ └──────────┘   │
+  │  │ │ts-database    │  │                        └────────────────┘ │
+  │  │ └───────────────┘  │                                           │
+  │  └────────────────────┘                                           │
+  └───────────────────────────────────────────────────────────────────┘
 ```
 
 **Arsitektur Microservices:** Setiap komponen (frontend, backend, database) dipisahkan ke container masing-masing. Satu instance MongoDB melayani kedua aplikasi — **perbedaan keamanan ada di layer aplikasi** (bagaimana data disimpan dan ditransmisikan), bukan di infrastruktur database.
@@ -544,6 +547,7 @@ Sistem menggunakan **Docker bridge network** (Layer 2) sebagai broadcast domain 
 - **`secure_db`**: Password disimpan sebagai **bcrypt hash** (cost 12) — solusi keamanan
 - Init script (`init-mongo.js`) melakukan seeding data saat container pertama kali distart
 - Ini mendemonstrasikan bahwa keamanan **bukan hanya soal infrastruktur** (database sama), tapi bagaimana **aplikasi memperlakukan data sensitif**
+- **Tailscale sidecar (`ts-database`)** — Memberikan database IP pada Tailnet, sehingga backend aman dapat berkomunikasi tanpa melalui bridge network
 
 **2. Attacker (Kali Linux — 172.20.0.100)**
 
@@ -556,6 +560,7 @@ Sistem menggunakan **Docker bridge network** (Layer 2) sebagai broadcast domain 
 - Container `linuxserver/webtop:alpine-xfce` — desktop Linux dengan browser GUI
 - Diakses dari host via `http://localhost:3080`
 - Target utama ARP Spoofing — traffic-nya diintersep oleh attacker
+- **Tailscale sidecar (`ts-client`)** — Memberikan client akses ke VPN (Tailnet) untuk berkomunikasi langsung dengan backend aman melalui WireGuard tunnel
 
 **4. Vulnerable Stack (HTTP — 172.20.0.20/21)**
 
@@ -566,18 +571,20 @@ Sistem menggunakan **Docker bridge network** (Layer 2) sebagai broadcast domain 
 
 - React Frontend (port 3443) dan Express Backend (port 5443) — dengan TLS, Helmet, JWT, bcrypt
 - Backend terhubung ke MongoDB `secure_db` — password disimpan sebagai bcrypt hash
-- **Tailscale sidecar** — SSH dan database hanya diakses via WireGuard tunnel
+- **Tailscale sidecar (`ts-backend`)** — Menerima koneksi aman dari client dan menghubungkan backend ke database via WireGuard tunnel
 
 | Container | IP | Port | Peran |
 | --------- | -- | ---- | ----- |
 | database | 172.20.0.50 | 27017 | MongoDB (shared) |
+| ts-database | (Tailnet IP) | — | Tailscale VPN (Database) |
 | attacker | 172.20.0.100 | — | Kali Linux (MITM) |
 | client-victim | 172.20.0.10 | 3080→3000 | Victim desktop |
+| ts-client | (Tailnet IP) | — | Tailscale VPN (Client) |
 | vuln-frontend | 172.20.0.20 | 3000 | HTTP frontend |
 | vuln-backend | 172.20.0.21 | 5000 | HTTP backend → vulnerable_db |
 | sec-frontend | 172.20.0.30 | 3443 | HTTPS frontend |
 | sec-backend | 172.20.0.31 | 5443 | HTTPS backend → secure_db |
-| ts-secure | (shared) | — | Tailscale VPN (SSH/DB) |
+| ts-backend | (Tailnet IP) | — | Tailscale VPN (Secure Backend) |
 
 ### 3.3 Teknologi yang Digunakan
 
@@ -1023,7 +1030,7 @@ Source: 172.20.0.10 → Destination: 172.20.0.21
            └── Amount: 500000
 ```
 
-**Output Bettercap terhadap HTTPS (Secure):**
+**Output Bettercap terhadap HTTPS (Secure) - Passive Sniffing:**
 
 ```
 [19:35:10] [sys.log] [inf] arp.spoof victim 172.20.0.10 spoofed
@@ -1031,11 +1038,20 @@ Source: 172.20.0.10 → Destination: 172.20.0.21
            └── Encrypted Application Data (cannot parse)
 ```
 
+**Output Bettercap terhadap HTTPS (Secure) - Active MITM dengan `https.proxy`:**
+
+```
+[20:10:05] [sys.log] [inf] https.proxy started on 172.20.0.100:5443
+[20:10:15] Browser memblokir koneksi dengan error ERR_CERT_AUTHORITY_INVALID
+           → Aplikasi rusak/terblokir, koneksi terputus.
+```
+
 **Analisis Bettercap:**
 
 - Modul `arp.spoof` berhasil meracuni ARP cache pada kedua target [12]
 - Modul `http.proxy` otomatis mendeteksi dan menampilkan kredensial HTTP [15]
-- Terhadap HTTPS, Bettercap hanya mendeteksi TLS handshake tanpa bisa membaca data [16]
+- Terhadap HTTPS (Pasif), Bettercap hanya mendeteksi TLS handshake tanpa bisa membaca data [16]
+- Terhadap HTTPS (Aktif), Bettercap menggunakan sertifikat TLS palsu. Browser dengan mekanisme pertahanan memblokirnya (Connection is not private) sehingga percobaan injeksi gagal dan keamanan user tetap terjaga.
 - File `.pcap` yang dihasilkan dapat dibuka di Wireshark untuk analisis mendalam [13]
 
 ### 4.4 Hasil Analisis Menggunakan Wireshark

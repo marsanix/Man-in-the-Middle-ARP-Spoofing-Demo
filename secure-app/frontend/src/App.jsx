@@ -14,7 +14,7 @@ import './App.css';
  * - CSP headers set in HTML
  */
 
-const API_URL = process.env.REACT_APP_API_URL || 'https://localhost:5443';
+const API_URL = process.env.REACT_APP_API_URL || 'https://ts-backend:5443';
 
 function App() {
   const [username, setUsername] = useState('');

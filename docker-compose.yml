@@ -2,35 +2,58 @@
 # Docker Compose - Network Security Lab (Microservices Architecture)
 # Man-in-the-Middle (MITM) & ARP Spoofing Attack Demonstration
 # =============================================================================
-# Architecture:
-#   Docker Bridge (lab-network: 172.20.0.0/24) — Layer 2 broadcast domain
 #
-#   ┌── Microservices ──────────────────────────────────────────────────┐
-#   │                                                                   │
-#   │  DATABASE (Shared)                                                │
-#   │    └── database       172.20.0.50  (MongoDB — shared instance)    │
-#   │         ├── vulnerable_db  → passwords stored PLAINTEXT           │
-#   │         └── secure_db      → passwords stored BCRYPT HASH         │
-#   │                                                                   │
-#   │  VULNERABLE STACK (HTTP — No Encryption)                          │
-#   │    ├── vuln-frontend  172.20.0.20  (React — port 3000)            │
-#   │    └── vuln-backend   172.20.0.21  (Express HTTP — port 5000)     │
-#   │         └── connects to database:27017/vulnerable_db              │
-#   │                                                                   │
-#   │  SECURE STACK (HTTPS — TLS Encrypted)                             │
-#   │    ├── sec-frontend   172.20.0.30  (React — port 3443)            │
-#   │    └── sec-backend    172.20.0.31  (Express HTTPS — port 5443)    │
-#   │         └── connects to database:27017/secure_db                  │
-#   │                                                                   │
-#   │  ATTACKER                                                         │
-#   │    └── attacker       172.20.0.100 (Kali Linux + attack tools)    │
-#   │                                                                   │
-#   │  CLIENT VICTIM                                                    │
-#   │    └── client-victim  172.20.0.10  (webtop XFCE desktop)          │
-#   │                                                                   │
-#   │  MANAGEMENT                                                       │
-#   │    └── ts-secure      (shared)     (Tailscale VPN — SSH/DB)       │
-#   └───────────────────────────────────────────────────────────────────┘
+# ARSITEKTUR:
+#
+#   Docker Bridge (lab-network: 172.20.0.0/24) — Layer 2 broadcast domain
+#   ┌────────────────────────────────────────────────────────────────────┐
+#   │                                                                    │
+#   │  DATABASE (Shared MongoDB)                                         │
+#   │    └── database       172.20.0.50  :27017                          │
+#   │         ├── vulnerable_db  → passwords PLAINTEXT                   │
+#   │         └── secure_db      → passwords BCRYPT HASH                 │
+#   │         └── ts-database (sidecar) → Tailscale IP 100.x.x.3        │
+#   │                                                                    │
+#   │  VULNERABLE STACK (HTTP — No Encryption, No Tailscale)             │
+#   │    ├── vuln-frontend  172.20.0.20  :3000 (React)                   │
+#   │    └── vuln-backend   172.20.0.21  :5000 (Express HTTP)            │
+#   │         └── connects via bridge: mongodb://172.20.0.50:27017       │
+#   │                                                                    │
+#   │  SECURE STACK (HTTPS + Tailscale)                                  │
+#   │    ├── sec-frontend   172.20.0.30  :3443 (React)                   │
+#   │    └── sec-backend    172.20.0.31  :5443 (Express HTTPS)           │
+#   │         ├── ts-backend (sidecar) → Tailscale IP 100.x.x.2         │
+#   │         └── connects via Tailscale: mongodb://ts-database:27017    │
+#   │                                                                    │
+#   │  CLIENT VICTIM                                                     │
+#   │    └── client-victim  172.20.0.10  :3000 (webtop XFCE)             │
+#   │         └── ts-client (sidecar) → Tailscale IP 100.x.x.1          │
+#   │                                                                    │
+#   │  ATTACKER                                                          │
+#   │    └── attacker       172.20.0.100 (Kali Linux)                    │
+#   │                                                                    │
+#   └────────────────────────────────────────────────────────────────────┘
+#
+#   Tailscale Overlay (WireGuard Encrypted Tunnel — Layer 3)
+#   ┌────────────────────────────────────────────────────────────────────┐
+#   │  ts-client (100.x.x.1)  ←──WireGuard──→  ts-backend (100.x.x.2)  │
+#   │  ts-backend (100.x.x.2) ←──WireGuard──→  ts-database (100.x.x.3) │
+#   │                                                                    │
+#   │  ✅ Traffic terenkripsi end-to-end via WireGuard                   │
+#   │  ✅ ARP Spoofing TIDAK EFEKTIF terhadap tunnel ini                 │
+#   │  ✅ Attacker hanya melihat WireGuard encrypted packets             │
+#   └────────────────────────────────────────────────────────────────────┘
+#
+# PERBANDINGAN JALUR:
+#   🔴 Vulnerable: client → bridge → vuln-backend → bridge → database
+#                   (HTTP plaintext — ARP Spoofing efektif)
+#
+#   🟢 Secure:     client → Tailscale tunnel → sec-backend → Tailscale tunnel → database
+#                   (HTTPS + WireGuard — ARP Spoofing tidak efektif)
+#
+# AUTH KEY:
+#   Cukup 1 Tailscale Auth Key (Reusable) untuk mendaftarkan 3 device:
+#   ts-client, ts-backend, ts-database
 #
 # MITRE ATT&CK: T1557.002 (ARP Cache Poisoning), T1040 (Network Sniffing)
 # =============================================================================
@@ -43,8 +66,9 @@ services:
   #   - vulnerable_db: password PLAINTEXT (demonstrasi OWASP A04:2025)
   #   - secure_db:     password BCRYPT HASH (solusi keamanan)
   #
-  # Ini mendemonstrasikan bahwa keamanan data bukan hanya soal infrastruktur
-  # database yang sama, tetapi bagaimana APLIKASI memperlakukan data sensitif.
+  # Tailscale sidecar (ts-database) membuat database dapat diakses via
+  # WireGuard tunnel — koneksi dari sec-backend melalui Tailscale IP,
+  # bukan melalui bridge network yang rentan ARP Spoofing.
   # ===========================================================================
   database:
     image: mongo:7
@@ -60,8 +84,32 @@ services:
       lab-network:
         ipv4_address: 172.20.0.50
 
+  # Tailscale sidecar untuk Database
+  # Memberi database Tailscale IP (100.x.x.x) agar bisa diakses
+  # oleh sec-backend via WireGuard tunnel (bukan bridge network)
+  ts-database:
+    image: tailscale/tailscale:latest
+    container_name: ts-database
+    environment:
+      - TS_HOSTNAME=ts-database
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - ./tailscale/database/state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - sys_module
+    network_mode: service:database
+    depends_on:
+      - database
+    restart: unless-stopped
+
   # ===========================================================================
   # ATTACKER (Kali Linux + Custom Tools)
+  # ===========================================================================
+  # Tidak memiliki Tailscale — hanya bisa melihat traffic di bridge network.
+  # Traffic yang melewati Tailscale tunnel tidak bisa diintersep.
   # ===========================================================================
   attacker:
     build:
@@ -87,8 +135,15 @@ services:
   # CLIENT VICTIM (Desktop GUI — Target of MITM Attack)
   # Akses GUI: http://localhost:3080
   # ===========================================================================
+  # Client memiliki Tailscale sidecar (ts-client) sehingga bisa mengakses
+  # sec-backend dan database melalui jalur aman (WireGuard tunnel).
+  #
+  # Demo perbandingan:
+  #   🔴 Akses http://vulnerable-app:3000  → via bridge → ARP Spoofing berhasil
+  #   🟢 Akses https://ts-backend:3443     → via Tailscale → ARP Spoofing gagal
+  # ===========================================================================
   client-victim:
-    image: linuxserver/webtop:alpine-xfce
+    image: linuxserver/webtop:latest
     container_name: client-victim
     hostname: client-victim
     environment:
@@ -106,9 +161,34 @@ services:
       lab-network:
         ipv4_address: 172.20.0.10
 
+  # Tailscale sidecar untuk Client Victim
+  # Memberi client Tailscale IP agar bisa mengakses sec-backend
+  # dan database via WireGuard tunnel yang aman
+  ts-client:
+    image: tailscale/tailscale:latest
+    container_name: ts-client
+    environment:
+      - TS_HOSTNAME=ts-client
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - ./tailscale/client/state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - sys_module
+    network_mode: service:client-victim
+    depends_on:
+      - client-victim
+    restart: unless-stopped
+
   # ===========================================================================
-  # VULNERABLE STACK (HTTP — No Encryption)
+  # VULNERABLE STACK (HTTP — No Encryption, No Tailscale)
   # Frontend: React (port 3000) → Backend: Express HTTP (port 5000) → MongoDB
+  # ===========================================================================
+  # Tidak memiliki Tailscale — semua koneksi melalui bridge network.
+  # Backend terhubung ke database via bridge IP (172.20.0.50).
+  # Semua traffic dapat diintersep oleh attacker.
   # ===========================================================================
   vulnerable-frontend:
     build:
@@ -142,8 +222,16 @@ services:
         ipv4_address: 172.20.0.21
 
   # ===========================================================================
-  # SECURE STACK (HTTPS — TLS Encrypted)
+  # SECURE STACK (HTTPS — TLS Encrypted + Tailscale)
   # Frontend: React (port 3443) → Backend: Express HTTPS (port 5443) → MongoDB
+  # ===========================================================================
+  # Backend memiliki Tailscale sidecar (ts-backend) sehingga:
+  #   1. Client-victim bisa mengakses via Tailscale tunnel (bukan bridge)
+  #   2. Backend bisa terhubung ke database via Tailscale tunnel
+  #
+  # Jalur aman (double encryption):
+  #   Client → [WireGuard tunnel] → Backend → [WireGuard tunnel] → Database
+  #            TLS + WireGuard                  WireGuard
   # ===========================================================================
   secure-frontend:
     build:
@@ -152,7 +240,7 @@ services:
     container_name: sec-frontend
     hostname: secure-app
     environment:
-      - REACT_APP_API_URL=https://secure-app:5443
+      - REACT_APP_API_URL=https://ts-backend:5443
     depends_on:
       - secure-backend
     restart: unless-stopped
@@ -169,7 +257,7 @@ services:
       - NODE_ENV=production
       - PORT=5443
       - JWT_SECRET=${JWT_SECRET:-super-secret-jwt-key-change-in-production}
-      - ALLOWED_ORIGIN=https://secure-app:3443
+      - ALLOWED_ORIGIN=https://172.20.0.30:3443
       - MONGO_URI=mongodb://database:27017/secure_db
     depends_on:
       - database
@@ -178,21 +266,19 @@ services:
       lab-network:
         ipv4_address: 172.20.0.31
 
-  # ===========================================================================
-  # TAILSCALE VPN — Secure Management Plane (SSH & DB Access)
-  # Demonstrasi: akses management server via WireGuard tunnel,
-  # sehingga tidak terekspos di bridge network yang rentan ARP Spoofing.
-  # ===========================================================================
-  tailscale-secure:
+  # Tailscale sidecar untuk Secure Backend
+  # Memberi backend Tailscale IP agar:
+  #   - Client bisa mengakses backend via tunnel aman
+  #   - Backend bisa mengakses database via tunnel aman
+  ts-backend:
     image: tailscale/tailscale:latest
-    container_name: ts-secure
-    hostname: secure-mgmt
+    container_name: ts-backend
     environment:
+      - TS_HOSTNAME=ts-backend
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_STATE_DIR=/var/lib/tailscale
-      - TS_EXTRA_ARGS=--advertise-tags=tag:secure
     volumes:
-      - ./tailscale/secure/state:/var/lib/tailscale
+      - ./tailscale/backend/state:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
     cap_add:
       - net_admin
